@@ -1,4 +1,4 @@
-# 📼 phashvaapi - VAAPI-Accelerated Stash Video Processor
+# 📼 StashVideohasherNode (VAAPI) - VAAPI-Accelerated Stash Video Processor
 
 A lightweight, distributed processing script that takes the heavy lifting off your Stash server. Instead of making your Stash instance do all the work, spread it across multiple nodes that can contribute back cover generation, sprite sheets, preview videos, and perceptual hashing. Now with GPU acceleration to make it even faster.
 
@@ -58,7 +58,7 @@ Your mileage may vary, but GPU acceleration is a game-changer for large batches.
 Edit `config.py` and point it at your Stash server:
 
 ```python
-stash_host = "192.168.1.71"  # Your Stash server IP
+stash_host = "127.0.0.1"  # Your Stash server IP
 stash_port = 9999            # Your Stash port
 ```
 
