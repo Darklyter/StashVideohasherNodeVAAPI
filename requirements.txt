@@ -1,0 +1,25 @@
+# phashvaapi Python dependencies
+
+# Stash API client
+stashapp-tools>=0.2.0
+
+# Image processing
+Pillow>=9.0.0
+
+# Progress bars and CLI formatting
+tqdm>=4.60.0
+
+# Standard library (included with Python, listed for reference)
+# - subprocess
+# - concurrent.futures
+# - argparse
+# - json
+# - base64
+# - os
+# - shutil
+# - time
+# - random
+# - string
+# - re
+# - datetime
+# - platform
