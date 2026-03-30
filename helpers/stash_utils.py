@@ -1,11 +1,21 @@
 # stash_utils.py
 
 from stashapi.stashapp import StashInterface
-from config import hashing_tag, hashing_error_tag, cover_error_tag, dry_run, stash_host, stash_port
+from config import hashing_tag, hashing_error_tag, cover_error_tag, dry_run, stash_host, stash_port, stash_api_key
 from datetime import datetime
 import threading
 
-stash = StashInterface({"host": stash_host, "port": stash_port})
+# Initialize Stash connection with optional API key
+stash_config = {
+    "host": stash_host,
+    "port": stash_port
+}
+
+# Add API key to config if it's set
+if stash_api_key:
+    stash_config["apikey"] = stash_api_key
+
+stash = StashInterface(stash_config)
 
 # Thread-safe error logging
 error_log_lock = threading.Lock()
@@ -101,4 +111,39 @@ def clear_error_tags(scene_ids):
     for scene_id in scene_ids:
         stash.update_scenes({"ids": scene_id, "tag_ids": {"ids": hashing_error_tag, "mode": "REMOVE"}})
         stash.update_scenes({"ids": scene_id, "tag_ids": {"ids": cover_error_tag, "mode": "REMOVE"}})
+
+def get_scene_markers_with_files(scene_id):
+    """
+    Get markers for a scene with file information.
+    Used during integrated mode (scene processing).
+
+    Args:
+        scene_id: Stash scene ID
+
+    Returns:
+        list: Marker objects with scene file metadata
+    """
+    return stash.get_scene_markers(
+        scene_id,
+        fragment="id title seconds scene { id files { path fingerprints { type value } } }"
+    )
+
+def log_marker_failure(marker_id, marker_title, step, error):
+    """
+    Log marker generation failure.
+    Similar to log_scene_failure but for markers.
+
+    Args:
+        marker_id: Stash marker ID
+        marker_title: Marker title for display
+        step: Processing step that failed
+        error: Error message or exception
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{timestamp} ❌ Marker {marker_id} — {marker_title} failed during {step}: {error}")
+
+    # Thread-safe error logging
+    with error_log_lock:
+        with open("error_log.txt", "a") as log:
+            log.write(f"[{timestamp}] Marker {marker_id} — {marker_title}: {step} failed: {error}\n")
 

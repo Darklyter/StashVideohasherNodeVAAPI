@@ -6,6 +6,7 @@ import os
 # 🌐 Stash API connection
 stash_host = "192.168.1.71"
 stash_port = 9999
+stash_api_key = None  # Set to your API key string if authentication is required (e.g., "your-api-key-here")
 
 windows = platform.system() == "Windows"
 
@@ -60,3 +61,18 @@ translations = (
         {'orig': '/data_stranghouse/', 'local': '/mnt/Stranghouse/'},
     ]
 )
+
+# 🎯 Marker generation settings
+generate_markers = False              # --generate-markers: Enable marker media generation
+marker_path = r"Y:/stash/generated" if windows else "/mnt/stash/stash/generated"
+marker_batch_size = 50                # Batch size for standalone marker mode
+
+# Media type toggles (all enabled by default)
+marker_preview_enabled = True         # Generate MP4 previews
+marker_thumbnail_enabled = True       # Generate WebP thumbnails
+marker_screenshot_enabled = True      # Generate JPG screenshots
+
+# Media generation parameters
+marker_preview_duration = 20          # MP4 clip duration in seconds
+marker_thumbnail_duration = 5         # WebP animation duration in seconds
+marker_thumbnail_fps = 12             # WebP animation frame rate

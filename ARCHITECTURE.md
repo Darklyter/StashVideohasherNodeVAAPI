@@ -6,6 +6,8 @@ This document provides detailed technical information about the phashvaapi syste
 - [System Overview](#system-overview)
 - [Core Components](#core-components)
 - [Processing Pipeline](#processing-pipeline)
+- [Standalone Generation Modes](#standalone-generation-modes)
+- [Marker Generation System](#marker-generation-system)
 - [VAAPI Integration](#vaapi-integration)
 - [Distributed Processing](#distributed-processing)
 - [Error Handling](#error-handling)
@@ -246,9 +248,194 @@ def concatenate_clips(self, clips):
         command.extend(['-c:v', 'libx264', ...])  ✅
 ```
 
+### 8. Discovery Modules
+
+**Purpose:** Find scenes/markers missing specific media types for standalone generation.
+
+#### Sprite Discovery (`helpers/sprite_discovery.py`)
+```python
+def discover_missing_sprites(limit=None):
+    """
+    Query all scenes from Stash, check if sprite files exist.
+
+    Returns: list[dict] with:
+        - scene_id, video_path, oshash, duration, scene_title
+    """
+```
+
+**Logic:**
+1. Query all scenes via Stash API
+2. Check if `{sprite_path}/{oshash}_sprite.jpg` exists
+3. Translate Docker/Stash paths to local paths
+4. Verify source video file exists
+5. Apply limit if specified
+
+#### Preview Discovery (`helpers/preview_discovery.py`)
+```python
+def discover_missing_previews(limit=None):
+    """
+    Query all scenes from Stash, check if preview files exist.
+
+    Returns: list[dict] with:
+        - scene_id, video_path, oshash, duration, scene_title
+    """
+```
+
+**Logic:** Similar to sprite discovery, checks for `{preview_path}/{oshash}.mp4`
+
+#### Marker Discovery (`helpers/marker_discovery.py`)
+```python
+def discover_missing_markers(limit=None):
+    """
+    Query all markers from Stash, check if marker media exists.
+
+    Returns: list[dict] with:
+        - marker_id, scene_id, seconds, video_path, oshash, marker_title
+    """
+```
+
+**Logic:**
+1. Query all markers via `stash.find_scene_markers()`
+2. For each marker, check if output files exist:
+   - `{marker_path}/markers/{oshash}/{int(seconds)}.mp4` (if enabled)
+   - `{marker_path}/markers/{oshash}/{int(seconds)}.webp` (if enabled)
+   - `{marker_path}/markers/{oshash}/{int(seconds)}.jpg` (if enabled)
+3. Translate paths and verify source video exists
+4. Apply limit if specified
+
+### 9. Marker Generator (`helpers/marker_generator.py`)
+
+**Purpose:** Generate media files (MP4/WebP/JPG) for scene markers (timestamps within videos).
+
+**Architecture:**
+```python
+class MarkerGenerator:
+    def __init__(self, video_path, marker_seconds, oshash, output_base_dir,
+                 ffmpeg='ffmpeg', ffprobe='ffprobe',
+                 preview_enabled=True, thumbnail_enabled=True, screenshot_enabled=True,
+                 preview_duration=20, thumbnail_duration=5, thumbnail_fps=12,
+                 use_vaapi=None, vaapi_device=None)
+
+    def generate_preview(self)       # MP4 preview (20-second clip)
+    def generate_thumbnail(self)     # WebP thumbnail (5-second animation)
+    def generate_screenshot(self)    # JPG screenshot (single frame)
+    def generate_marker(self)        # Main orchestrator with try/finally
+    def clean_temp_dirs(self)        # Cleanup temporary directories
+```
+
+**File Structure:**
+```
+{marker_path}/markers/{oshash}/{int(seconds)}.{mp4|webp|jpg}
+
+Example:
+/mnt/stash/stash/generated/markers/abc123def456/15.mp4
+/mnt/stash/stash/generated/markers/abc123def456/15.webp
+/mnt/stash/stash/generated/markers/abc123def456/15.jpg
+```
+
+**Integer Truncation:**
+- Marker at 15.2 seconds → filename `15.mp4`
+- Marker at 15.9 seconds → filename `15.mp4` (overwrites previous)
+- Design choice for collision handling
+
+**Media Generation:**
+
+1. **MP4 Preview (20-second clip):**
+```bash
+# VAAPI:
+ffmpeg -vaapi_device {device} -ss {seconds} -t 20 -i {video} \
+  -vf 'format=nv12,hwupload,scale_vaapi=640:-2' \
+  -c:v h264_vaapi -crf 18 -an {output}
+
+# Software fallback:
+ffmpeg -ss {seconds} -t 20 -i {video} \
+  -vf 'scale=640:-2' -c:v libx264 -crf 18 -preset slow -an {output}
+```
+
+2. **WebP Thumbnail (5-second animation):**
+```bash
+ffmpeg -ss {seconds} -t 5 -i {video} \
+  -vf 'scale=640:-2,fps=12' \
+  -c:v libwebp -lossless 1 -q:v 70 -compression_level 6 -loop 0 {output}
+```
+
+3. **JPG Screenshot (single frame):**
+```bash
+ffmpeg -ss {seconds} -i {video} \
+  -vframes 1 -q:v 2 {output}
+```
+
+**Error Isolation:**
+- Marker failures don't affect scene processing success
+- Logged separately via `log_marker_failure()`
+- Markers don't support Stash tags (no error tagging)
+- Errors written to `error_log.txt`
+
+## Standalone Generation Modes
+
+**New in v1.1:** Standalone modes allow generating sprites, previews, and markers without full scene processing.
+
+### Architecture
+
+**Worker Functions:**
+```python
+def process_sprite(scene_data, index, total, vaapi_supported, vaapi_device):
+    """Generate sprite for a single scene (standalone mode)."""
+
+def process_preview(scene_data, index, total, vaapi_supported, vaapi_device):
+    """Generate preview for a single scene (standalone mode)."""
+
+def process_marker(marker_data, index, total, vaapi_supported, vaapi_device):
+    """Generate marker media for a single marker (standalone mode)."""
+```
+
+### Standalone Mode Detection
+
+```python
+standalone_mode = (
+    args.standalone_sprites or
+    args.standalone_previews or
+    args.standalone_markers or
+    args.generate_markers  # Alias for standalone_markers
+)
+
+if standalone_mode:
+    # Execute standalone generation and exit
+    # Don't enter main scene processing loop
+```
+
+### Usage Patterns
+
+**Standalone sprite generation:**
+```bash
+python phash_videohasher_main.py --standalone-sprites --sprite-batch-size 50 --verbose
+```
+
+**Standalone preview generation:**
+```bash
+python phash_videohasher_main.py --standalone-previews --preview-batch-size 25 --verbose
+```
+
+**Standalone marker generation:**
+```bash
+python phash_videohasher_main.py --standalone-markers --marker-batch-size 100 --verbose
+```
+
+**Combined standalone generation:**
+```bash
+python phash_videohasher_main.py --standalone-sprites --standalone-previews --standalone-markers --verbose
+```
+
+### Benefits
+
+1. **Flexibility** - Generate specific media types without full processing
+2. **Performance** - Skip unnecessary work (phash, cover)
+3. **Scheduling** - Run different generation types at different times
+4. **Testing** - Test specific generators in isolation
+
 ## Processing Pipeline
 
-### High-Level Flow
+### Mode Selection
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -256,9 +443,25 @@ def concatenate_clips(self, clips):
 │  • Parse CLI arguments                                       │
 │  • Detect VAAPI (once)                                       │
 │  • Initialize configuration                                  │
+│  • Run health checks                                         │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
+           ┌─────────────┴─────────────┐
+           │  Standalone Mode Active?  │
+           └──────┬──────────────┬─────┘
+                  │ YES          │ NO
+                  ▼              ▼
+      ┌───────────────┐   ┌──────────────────┐
+      │  Standalone   │   │  Integrated      │
+      │  Generation   │   │  Scene           │
+      │  Mode         │   │  Processing      │
+      └───────────────┘   └──────────────────┘
+```
+
+### High-Level Flow: Integrated Mode
+
+```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Batch Processing Loop                     │
 │  1. Clean temp directories                                   │
@@ -281,10 +484,38 @@ def concatenate_clips(self, clips):
 │  • TRY:                                                       │
 │    ├─ Generate phash                                         │
 │    ├─ Extract cover image                                    │
-│    ├─ Generate sprite sheet (if enabled)                     │
-│    └─ Generate preview video (if enabled)                    │
+│    ├─ Generate sprite sheet (if --generate-sprite)           │
+│    ├─ Generate preview video (if --generate-preview)         │
+│    └─ Generate marker media (if --generate-markers)          │
 │  • FINALLY:                                                  │
 │    └─ Release scene (remove tag)                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### High-Level Flow: Standalone Mode
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Standalone Generation                      │
+│  1. Clean temp directories                                   │
+│  2. Discover missing media (sprites/previews/markers)        │
+│  3. Create thread pool                                       │
+│  4. Submit items to workers ────────────┐                    │
+│  5. Collect results                     │                    │
+│  6. Shutdown thread pool                │                    │
+│  7. Exit (no loop)                      │                    │
+└─────────────────────────────────────────┼───────────────────┘
+                                          │
+         ┌────────────────────────────────┘
+         │ (parallel workers)
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Per-Item Processing (No Tags)                   │
+│  • Translate file paths                                      │
+│  • Verify file exists                                        │
+│  • Generate media (sprite/preview/marker)                    │
+│  • No scene claiming/releasing                               │
+│  • Errors logged but don't affect other items                │
 └─────────────────────────────────────────────────────────────┘
 ```
 

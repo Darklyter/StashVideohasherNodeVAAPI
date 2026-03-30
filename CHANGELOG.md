@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial public release
 - Comprehensive documentation (README.md, ARCHITECTURE.md, CONTRIBUTING.md)
 - MIT License
+- **Marker generation system** - Generate MP4 previews (20s), WebP thumbnails (5s animations), and JPG screenshots for scene markers
+  - Integrated mode: Generate marker media during scene processing (--generate-markers)
+  - Standalone mode: Batch process missing marker media (--standalone-markers)
+  - Media type filters: --marker-preview-only, --marker-thumbnail-only, --marker-screenshot-only
+  - VAAPI hardware acceleration support for MP4 preview generation
+  - Configurable durations and quality settings
+  - Error isolation: Marker failures don't affect scene processing
+- **Standalone generation modes** - Generate sprites, previews, or markers without full scene processing
+  - --standalone-sprites: Batch generate sprites only
+  - --standalone-previews: Batch generate previews only
+  - --standalone-markers: Batch generate marker media only
+  - Configurable batch sizes for each mode
+  - Combined mode support (run multiple standalone modes together)
+- **Discovery modules** - New helper modules for finding missing media
+  - sprite_discovery.py: Find scenes missing sprite sheets
+  - preview_discovery.py: Find scenes missing preview videos
+  - marker_discovery.py: Find markers missing media files
+- **Enhanced CLI help** - Organized argument groups with comprehensive usage examples
+- **Worker functions** - Dedicated functions for standalone sprite/preview/marker processing
+- **Stash API key authentication** - Optional API key support for secured Stash instances
 - **Health check system** - Validates configuration, paths, and dependencies before processing
 - **Statistics tracking** - Shows success rate, average time, and total processing time after each batch
 - **Signal handling** - Graceful shutdown on SIGTERM and SIGINT for systemd/cron compatibility

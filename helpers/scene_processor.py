@@ -221,6 +221,60 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
                         success = False
                         # Don't return early - continue to release scene
 
+        # Integrated marker generation (if enabled)
+        if config.generate_markers:
+            try:
+                if success:  # Only generate markers if scene processing succeeded
+                    from helpers.marker_generator import MarkerGenerator
+                    from helpers.stash_utils import get_scene_markers_with_files, log_marker_failure
+
+                    markers = get_scene_markers_with_files(scene_id)
+
+                    if markers:
+                        if config.verbose:
+                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🎯 Found {len(markers)} markers for scene {scene_id}")
+
+                        for marker in markers:
+                            marker_id = marker['id']
+                            marker_seconds = marker['seconds']
+                            marker_title = marker.get('title', f"Marker at {marker_seconds}s")
+
+                            if dry_run:
+                                print(f"[DRY RUN] Would generate marker media for {marker_title}")
+                                performed_options.append(f"marker {marker_id} (dry run)")
+                            else:
+                                try:
+                                    generator = MarkerGenerator(
+                                        filename, marker_seconds, filehash,
+                                        config.marker_path,
+                                        ffmpeg=ffmpeg, ffprobe=ffprobe,
+                                        preview_enabled=config.marker_preview_enabled,
+                                        thumbnail_enabled=config.marker_thumbnail_enabled,
+                                        screenshot_enabled=config.marker_screenshot_enabled,
+                                        preview_duration=config.marker_preview_duration,
+                                        thumbnail_duration=config.marker_thumbnail_duration,
+                                        thumbnail_fps=config.marker_thumbnail_fps,
+                                        use_vaapi=vaapi_supported,
+                                        vaapi_device=vaapi_device
+                                    )
+
+                                    result = generator.generate_marker()
+
+                                    if result['success']:
+                                        files_str = ', '.join([os.path.basename(f) for f in result['files']])
+                                        performed_options.append(f"marker {marker_id}")
+                                        if config.verbose:
+                                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Marker {marker_title} generated: {files_str}")
+                                    else:
+                                        log_marker_failure(marker_id, marker_title, "marker generation",
+                                                         result.get('error', 'Unknown error'))
+                                except Exception as e:
+                                    log_marker_failure(marker_id, marker_title, "marker generation", e)
+                                    # Don't fail scene processing for marker errors
+            except Exception as e:
+                log_scene_failure(scene_id, filename_pretty, "marker discovery", e)
+                # Don't fail scene processing for marker discovery errors
+
         end_time = time.time()
         elapsed = end_time - start_time
         options_str = ', '.join(performed_options) if performed_options else 'none'

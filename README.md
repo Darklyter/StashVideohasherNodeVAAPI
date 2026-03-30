@@ -32,6 +32,7 @@ The script is designed to let multiple systems chip in on processing your Stash 
 2. **Cover Image** - Extracted from the video if you don't have one
 3. **Sprite Sheet** - 9×9 grid of thumbnails with WebVTT metadata for scrubbing
 4. **Preview Video** - 15-second compilation (15 clips × 1 second each)
+5. **Marker Media** - MP4 previews (20s clips), WebP thumbnails (5s animations), and JPG screenshots for scene markers
 
 ## 🚀 Hardware Acceleration (VAAPI)
 
@@ -58,9 +59,23 @@ Your mileage may vary, but GPU acceleration is a game-changer for large batches.
 Edit `config.py` and point it at your Stash server:
 
 ```python
-stash_host = "127.0.0.1"  # Your Stash server IP
-stash_port = 9999            # Your Stash port
+stash_host = "127.0.0.1"       # Your Stash server IP
+stash_port = 9999               # Your Stash port
+stash_api_key = None            # Set to your API key if authentication is required
 ```
+
+**API Key Authentication (Optional):**
+
+If your Stash instance requires authentication, set the API key:
+```python
+stash_api_key = "your-api-key-here"
+```
+
+To get your Stash API key:
+1. Open Stash web interface
+2. Go to **Settings → Security**
+3. Find or generate your API key
+4. Copy the key and set it in `config.py`
 
 ### 2. Set Up Path Translations (if needed)
 
@@ -85,14 +100,45 @@ cover_error_tag = 15019    # "Cover Error" tag
 
 ### 4. Set Output Paths
 
-Tell the script where to save sprites and previews:
+Tell the script where to save sprites, previews, and markers:
 
 ```python
 sprite_path = "/mnt/stash/stash/generated/vtt"
 preview_path = "/mnt/stash/stash/generated/screenshots"
+marker_path = "/mnt/stash/stash/generated"  # Markers go in markers/{oshash}/
 ```
 
-### 5. Run Health Check
+### 5. Configure Marker Generation (Optional)
+
+Marker generation is disabled by default. Configure in `config.py`:
+
+```python
+# Enable marker generation
+generate_markers = True  # or use --generate-markers CLI flag
+
+# Media type toggles (all enabled by default)
+marker_preview_enabled = True         # Generate MP4 previews (20s clips)
+marker_thumbnail_enabled = True       # Generate WebP thumbnails (5s animations)
+marker_screenshot_enabled = True      # Generate JPG screenshots (single frames)
+
+# Media generation parameters
+marker_preview_duration = 20          # MP4 clip duration in seconds
+marker_thumbnail_duration = 5         # WebP animation duration in seconds
+marker_thumbnail_fps = 12             # WebP animation frame rate
+marker_batch_size = 50                # Batch size for standalone marker mode
+```
+
+**Marker file structure:**
+```
+{marker_path}/markers/{oshash}/{seconds}.{mp4|webp|jpg}
+
+Example:
+/mnt/stash/stash/generated/markers/abc123def456/15.mp4
+/mnt/stash/stash/generated/markers/abc123def456/15.webp
+/mnt/stash/stash/generated/markers/abc123def456/15.jpg
+```
+
+### 6. Run Health Check
 
 Make sure everything's configured correctly:
 
@@ -106,22 +152,63 @@ If all checks pass ✅, you're ready to roll.
 
 ### Basic Usage
 
-Process scenes with default settings:
+Process scenes with default settings (phash + cover only):
 ```bash
 python phash_videohasher_main.py
 ```
 
-### Common Patterns
+### Integrated Scene Processing
 
-**Single batch for testing:**
+Process scenes with all media generation during scene processing:
 ```bash
+# Full processing (phash + cover + sprite + preview + markers)
+python phash_videohasher_main.py --generate-sprite --generate-preview --generate-markers --once --verbose
+
+# Single batch for testing
 python phash_videohasher_main.py --once --verbose --batch-size 5
+
+# Process specific videos (by filename pattern)
+python phash_videohasher_main.py --filemask "JoonMali*" --generate-sprite --generate-preview --once
 ```
 
-**Process specific videos (by filename pattern):**
+### Standalone Generation Modes
+
+Generate media without full scene processing:
+
+**Generate sprites only (50 scenes):**
 ```bash
-python phash_videohasher_main.py --filemask "JoonMali*" --once
+python phash_videohasher_main.py --standalone-sprites --sprite-batch-size 50 --verbose
 ```
+
+**Generate previews only (25 scenes):**
+```bash
+python phash_videohasher_main.py --standalone-previews --preview-batch-size 25 --verbose
+```
+
+**Generate marker media only (100 markers):**
+```bash
+python phash_videohasher_main.py --standalone-markers --marker-batch-size 100 --verbose
+```
+
+**Combined standalone generation:**
+```bash
+# Generate all three types at once
+python phash_videohasher_main.py --standalone-sprites --standalone-previews --standalone-markers --verbose
+```
+
+**Marker media type filters:**
+```bash
+# Generate only MP4 previews (20-second clips)
+python phash_videohasher_main.py --standalone-markers --marker-preview-only --verbose
+
+# Generate only WebP thumbnails (5-second animations)
+python phash_videohasher_main.py --standalone-markers --marker-thumbnail-only --verbose
+
+# Generate only JPG screenshots (single frames)
+python phash_videohasher_main.py --standalone-markers --marker-screenshot-only --verbose
+```
+
+### Common Patterns
 
 **Retry scenes that had errors:**
 ```bash
@@ -136,43 +223,64 @@ python phash_videohasher_main.py --batch-size 50 --once
 **See what it would do (dry run):**
 ```bash
 python phash_videohasher_main.py --dry-run --verbose --once
+python phash_videohasher_main.py --standalone-markers --dry-run --verbose
 ```
 
 ## 📋 CLI Options
 
+Run `python phash_videohasher_main.py --help` for complete usage information.
+
+### Basic Options
 ```
-usage: phash_videohasher_main.py [-h] [--windows] [--generate-sprite] [--generate-preview]
-                                 [--batch-size BATCH_SIZE] [--max-workers MAX_WORKERS]
-                                 [--dry-run] [--verbose] [--once] [--vaapi] [--novaapi]
-                                 [--debug] [--filemask FILEMASK] [--health-check]
-                                 [--retry-errors] [--clear-error-tags]
+--batch-size BATCH_SIZE     Number of scenes per batch (default: 25)
+--max-workers MAX_WORKERS   Parallel worker threads (default: 4)
+--once                      Process one batch and exit (great for cron)
+--verbose                   Show progress bars and detailed output
+--debug                     Show FFmpeg commands and timing breakdowns
+--dry-run                   Simulate processing without making changes
+--filemask FILEMASK         Filter scenes by filename pattern (e.g., 'JoonMali*' or '*.mp4')
+--windows                   Use Windows paths and binaries
+```
 
-Processing Options:
-  --batch-size BATCH_SIZE     Number of scenes per batch (default: 25)
-  --max-workers MAX_WORKERS   Parallel worker threads (default: 4)
-  --once                      Process one batch and exit (great for cron)
-  --generate-sprite           Enable sprite sheet generation
-  --generate-preview          Enable preview video generation
+### Integrated Scene Processing
+Enable media generation during full scene processing:
+```
+--generate-sprite           Generate sprite sheets during scene processing
+--generate-preview          Generate preview videos during scene processing
+--generate-markers          Generate marker media during scene processing
+```
 
-VAAPI / Hardware Acceleration:
-  --vaapi                     Force VAAPI hardware acceleration ON
-  --novaapi                   Force VAAPI hardware acceleration OFF
+### Standalone Generation Modes
+Generate media without full scene processing:
+```
+--standalone-sprites        Batch generate sprites only
+--sprite-batch-size SIZE    Batch size for standalone sprite generation (default: 25)
 
-Filtering:
-  --filemask FILEMASK         Filter scenes by filename pattern (e.g., 'JoonMali*' or '*.mp4')
+--standalone-previews       Batch generate previews only
+--preview-batch-size SIZE   Batch size for standalone preview generation (default: 25)
 
-Error Management:
-  --retry-errors              Process scenes that previously failed
-  --clear-error-tags          Remove error tags from all scenes and exit
-  --health-check              Validate configuration and exit
+--standalone-markers        Batch generate markers only
+--marker-batch-size SIZE    Batch size for standalone marker generation (default: 50)
+```
 
-Output Control:
-  --verbose                   Show progress bars and detailed output
-  --debug                     Show FFmpeg commands and timing breakdowns
-  --dry-run                   Simulate processing without making changes
+### Marker Generation Options
+```
+--marker-preview-only       Generate only MP4 previews (20s clips)
+--marker-thumbnail-only     Generate only WebP thumbnails (5s animations)
+--marker-screenshot-only    Generate only JPG screenshots (single frames)
+```
 
-Platform:
-  --windows                   Use Windows paths and binaries
+### Hardware Acceleration
+```
+--vaapi                     Force VAAPI hardware acceleration ON
+--novaapi                   Force VAAPI hardware acceleration OFF
+```
+
+### Utilities
+```
+--health-check              Validate configuration and exit
+--retry-errors              Process scenes that previously failed
+--clear-error-tags          Remove error tags from all scenes and exit
 ```
 
 ## 🏥 Health Checks
