@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-03-30
+
 ### Added
 - Initial public release
 - Comprehensive documentation (README.md, ARCHITECTURE.md, CONTRIBUTING.md)
@@ -106,8 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **v1.1.0** - Marker generation, standalone modes, API key support, and performance fixes
 - **v0.1.0** - Initial release with core functionality
-- **Unreleased** - Bug fixes and performance optimizations
 
 ---
 
