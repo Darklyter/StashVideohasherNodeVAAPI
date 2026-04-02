@@ -22,8 +22,10 @@ shutdown_requested = False
 
 def apply_cli_args(args):
     config.windows = args.windows
-    config.generate_sprite = args.generate_sprite
-    config.generate_preview = args.generate_preview
+    if args.generate_sprite:
+        config.generate_sprite = True
+    if args.generate_preview:
+        config.generate_preview = True
     config.dry_run = args.dry_run
     config.verbose = args.verbose
     config.once = args.once
@@ -34,7 +36,11 @@ def apply_cli_args(args):
         config.max_workers = args.max_workers
     if args.filemask:
         config.filemask = args.filemask
-    # VAAPI override logic
+    if hasattr(args, 'nvenc') and args.nvenc:
+        config.nvenc = True
+    if hasattr(args, 'hw_priority') and args.hw_priority:
+        config.hw_priority = args.hw_priority
+    # VAAPI CLI overrides (take precedence over config.vaapi)
     if hasattr(args, 'vaapi') and args.vaapi:
         config.vaapi_override = True
     elif hasattr(args, 'novaapi') and args.novaapi:
@@ -211,44 +217,37 @@ def process_marker(marker_data, index, total, vaapi_supported, vaapi_device):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="VAAPI-accelerated Stash video processor with perceptual hashing, sprite, preview, and marker generation",
+        description=(
+            "VAAPI-accelerated Stash video processor.\n\n"
+            "DEFAULT BEHAVIOR (no options): Discovers scenes missing a phash, then generates\n"
+            "phash + cover image for each one. Sprite and preview generation also run if\n"
+            "enabled in config.py (generate_sprite / generate_preview). Marker generation\n"
+            "is off by default. Loops continuously until all scenes are processed.\n"
+            "All generation types can be forced on via flags below regardless of config."
+        ),
         epilog="""
-Examples:
-  # Process 25 scenes (phash + cover image only)
+Default run (loops until complete, runs whatever is enabled in config.py):
+  python %(prog)s
+
+One batch and exit — runs all generation types enabled in config.py (good for cron):
   python %(prog)s --once --verbose
 
-  # Process scenes with all media generation
+Force all generation on regardless of config (one batch):
   python %(prog)s --generate-sprite --generate-preview --generate-markers --once --verbose
 
-  # Standalone sprite generation (50 scenes)
+Standalone modes — generate missing media without reprocessing scenes:
   python %(prog)s --standalone-sprites --sprite-batch-size 50 --verbose
-
-  # Standalone preview generation (25 scenes)
   python %(prog)s --standalone-previews --preview-batch-size 25 --verbose
-
-  # Standalone marker generation (100 markers)
   python %(prog)s --standalone-markers --marker-batch-size 100 --verbose
-
-  # Combined standalone generation
   python %(prog)s --standalone-sprites --standalone-previews --standalone-markers --verbose
 
-  # Filter scenes by filename pattern
+Other useful options:
   python %(prog)s --filemask "JoonMali*" --once --verbose
-
-  # Dry run to test without making changes
   python %(prog)s --standalone-markers --dry-run --verbose
-
-  # Force VAAPI or software encoding
   python %(prog)s --vaapi --once --verbose
   python %(prog)s --novaapi --once --verbose
-
-  # Health check and diagnostics
   python %(prog)s --health-check
-
-  # Retry scenes that previously failed
   python %(prog)s --retry-errors --once --verbose
-
-  # Clear error tags from all scenes
   python %(prog)s --clear-error-tags
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
@@ -288,8 +287,10 @@ Examples:
 
     # Hardware acceleration
     hardware = parser.add_argument_group('Hardware Acceleration')
-    hardware.add_argument("--vaapi", action="store_true", help="Force VAAPI hardware acceleration (Intel/AMD GPUs)")
-    hardware.add_argument("--novaapi", action="store_true", help="Disable VAAPI, use software encoding only")
+    hardware.add_argument("--vaapi", action="store_true", help="Force VAAPI hardware acceleration on (overrides config.vaapi)")
+    hardware.add_argument("--novaapi", action="store_true", help="Force VAAPI off (overrides config.vaapi)")
+    hardware.add_argument("--nvenc", action="store_true", help="Enable NVIDIA NVENC hardware encoder (overrides config.nvenc)")
+    hardware.add_argument("--hw-priority", choices=["vaapi", "nvenc"], help="Which encoder takes precedence when both are available (overrides config.hw_priority)")
 
     # Utilities
     utilities = parser.add_argument_group('Utilities')
@@ -304,29 +305,56 @@ Examples:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    # VAAPI notification (only once at start)
+    # Hardware encoder resolution (evaluated once at startup)
     from datetime import datetime
     from helpers.vaapi_utils import vaapi_available
+
+    # Step 1: Auto-detect VAAPI
     vaapi_supported, vaapi_device = vaapi_available() if not config.windows else (False, None)
+
+    # Step 2: Apply CLI overrides — highest precedence
     vaapi_override = getattr(config, 'vaapi_override', None)
     if vaapi_override is True:
         vaapi_supported = True
         if config.verbose:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI forced ON via CLI. VAAPI will be used for preview and sprite generation.")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI forced ON via --vaapi.")
     elif vaapi_override is False:
         vaapi_supported = False
         vaapi_device = None
         if config.verbose:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI forced OFF via CLI. Software will be used for preview and sprite generation.")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI forced OFF via --novaapi.")
+    elif not config.vaapi:
+        # VAAPI disabled in config, no CLI override present
+        vaapi_supported = False
+        vaapi_device = None
+        if config.verbose:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI disabled in config.")
     elif config.verbose:
         if vaapi_supported:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI detected on {vaapi_device} and will be used for preview and sprite generation.")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI detected on {vaapi_device}.")
         else:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI not available. Software will be used for preview and sprite generation.")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 VAAPI not available.")
 
-    # Default to renderD128 if VAAPI forced but device not detected
+    # Default device path if VAAPI was forced on but detection returned no device
     if vaapi_supported and vaapi_device is None:
         vaapi_device = '/dev/dri/renderD128'
+
+    # Step 3: Apply hw_priority when both VAAPI and NVENC are configured
+    if vaapi_supported and config.nvenc and config.hw_priority == "nvenc":
+        vaapi_supported = False
+        vaapi_device = None
+        if config.verbose:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 NVENC takes priority over VAAPI (hw_priority=nvenc).")
+
+    # Report final encoder selection
+    if config.verbose:
+        if vaapi_supported:
+            encoder = f"VAAPI ({vaapi_device})"
+        elif config.nvenc:
+            encoder = "NVENC"
+        else:
+            encoder = "software (libx264)"
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🎬 Hardware encoder: {encoder}")
 
     # Handle special CLI commands
     if args.health_check:

@@ -146,12 +146,11 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
         if generate_sprite:
             sprite_file = os.path.join(sprite_path, f"{filehash}_sprite.jpg")
             vtt_file = os.path.join(sprite_path, f"{filehash}_thumbs.vtt")
-        # VAAPI notification handled by main script
-            sprite_cmd = f"{ffmpeg} -i '{filename}' -vf 'scale=320:240,tile=5x5' -frames:v 1 '{sprite_file}'"
+            encoder_note = "VAAPI" if vaapi_supported else "software"
             if not os.path.exists(sprite_file):
                 if config.debug:
                     print(f"🟡 [DEBUG] Starting sprite generation for {filename_pretty}")
-                    print(f"🟡 [DEBUG] CLI: {sprite_cmd}")
+                    print(f"🟡 [DEBUG] VideoSpriteGenerator: 81 frames × {encoder_note} extraction → PIL assembly → {sprite_file}")
                     sprite_start = time.time()
                 if dry_run:
                     print(f"[DRY RUN] Would generate sprite for {filename_pretty} → {sprite_file}")
@@ -181,7 +180,9 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
             preview_file = os.path.join(preview_path, f"{filehash}.mp4")
         # VAAPI notification handled by main script
             if vaapi_supported and vaapi_device:
-                preview_cmd = f"{ffmpeg} -vaapi_device {vaapi_device} -ss 0 -i '{filename}' -vf 'format=nv12,hwupload,scale_vaapi=640:360' -c:v h264_vaapi -crf 18 -preset fast -an -y '{preview_file}'"
+                preview_cmd = f"{ffmpeg} -vaapi_device {vaapi_device} -ss 0 -i '{filename}' -vf 'format=nv12,hwupload,scale_vaapi=640:360' -c:v h264_vaapi -global_quality 18 -an -y '{preview_file}'"
+            elif config.nvenc:
+                preview_cmd = f"{ffmpeg} -i '{filename}' -vf 'scale=640:360' -c:v h264_nvenc -cq:v 18 -preset p4 -an -y '{preview_file}'"
             else:
                 preview_cmd = f"{ffmpeg} -i '{filename}' -vf 'scale=640:360' -c:v libx264 -crf 18 -preset slow -an -y '{preview_file}'"
             if not os.path.exists(preview_file):

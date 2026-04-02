@@ -1,12 +1,13 @@
 # stash_utils.py
 
 from stashapi.stashapp import StashInterface
-from config import hashing_tag, hashing_error_tag, cover_error_tag, dry_run, stash_host, stash_port, stash_api_key
+from config import hashing_tag, hashing_error_tag, cover_error_tag, dry_run, stash_scheme, stash_host, stash_port, stash_api_key, excluded_paths
 from datetime import datetime
 import threading
 
 # Initialize Stash connection with optional API key
 stash_config = {
+    "scheme": stash_scheme,
     "host": stash_host,
     "port": stash_port
 }
@@ -22,7 +23,11 @@ error_log_lock = threading.Lock()
 
 def log_scene_failure(scene_id, filename_pretty, step, error):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{timestamp} ❌ Scene {scene_id} — {filename_pretty} failed during {step}: {error}")
+    msg = f"{timestamp} ❌ Scene {scene_id} — {filename_pretty} failed during {step}: {error}"
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        print(msg.encode('utf-8', errors='replace').decode('ascii', errors='replace'))
 
 def reset_terminal():
     import platform
@@ -40,14 +45,17 @@ def reset_terminal():
             pass  # If stty fails, at least we reset colors/cursor
 
 def get_total_scene_count():
+    fragment = "id files{path}" if excluded_paths else "id"
     scenes = stash.find_scenes(
         f={
             "phash": {"value": "", "modifier": "IS_NULL"},
             "tags": {"value": [hashing_tag, hashing_error_tag, cover_error_tag], "modifier": "EXCLUDES"}
         },
         filter={"sort": "created_at", "direction": "DESC", "per_page": -1},
-        fragment="id"
+        fragment=fragment
     )
+    if excluded_paths:
+        scenes = [s for s in scenes if not any(ep in s['files'][0]['path'] for ep in excluded_paths)]
     return len(scenes)
 
 def tag_scene_error(scene_id, error_tag, error_msg=None):
@@ -59,7 +67,7 @@ def tag_scene_error(scene_id, error_tag, error_msg=None):
     if error_msg:
         # Thread-safe error logging
         with error_log_lock:
-            with open("error_log.txt", "a") as log:
+            with open("error_log.txt", "a", encoding="utf-8") as log:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 log.write(f"[{timestamp}] Scene {scene_id}: {error_msg}\n")
 
@@ -140,10 +148,14 @@ def log_marker_failure(marker_id, marker_title, step, error):
         error: Error message or exception
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{timestamp} ❌ Marker {marker_id} — {marker_title} failed during {step}: {error}")
+    msg = f"{timestamp} ❌ Marker {marker_id} — {marker_title} failed during {step}: {error}"
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        print(msg.encode('utf-8', errors='replace').decode('ascii', errors='replace'))
 
     # Thread-safe error logging
     with error_log_lock:
-        with open("error_log.txt", "a") as log:
+        with open("error_log.txt", "a", encoding="utf-8") as log:
             log.write(f"[{timestamp}] Marker {marker_id} — {marker_title}: {step} failed: {error}\n")
 

@@ -5,7 +5,7 @@ import os
 import shutil
 import time
 from datetime import datetime
-from config import verbose
+from config import verbose, nvenc
 
 class MarkerGenerator:
     def __init__(self, video_path, marker_seconds, oshash, output_base_dir,
@@ -84,8 +84,23 @@ class MarkerGenerator:
                 '-i', self.video_path,
                 '-vf', 'format=nv12,hwupload,scale_vaapi=640:-2',
                 '-c:v', 'h264_vaapi',
-                '-crf', '18',
-                '-an',  # No audio
+                '-global_quality', '18',
+                '-an',
+                '-loglevel', 'quiet',
+                self.mp4_path
+            ]
+        elif nvenc:
+            # NVENC hardware-accelerated encoding
+            command = [
+                self.ffmpeg, '-y',
+                '-ss', str(self.marker_seconds),
+                '-t', str(self.preview_duration),
+                '-i', self.video_path,
+                '-vf', 'scale=640:-2',
+                '-c:v', 'h264_nvenc',
+                '-cq:v', '18',
+                '-preset', 'p4',
+                '-an',
                 '-loglevel', 'quiet',
                 self.mp4_path
             ]
@@ -100,7 +115,7 @@ class MarkerGenerator:
                 '-c:v', 'libx264',
                 '-crf', '18',
                 '-preset', 'slow',
-                '-an',  # No audio
+                '-an',
                 '-loglevel', 'quiet',
                 self.mp4_path
             ]

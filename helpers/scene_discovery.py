@@ -7,12 +7,12 @@ from helpers.stash_utils import stash
 import config
 
 def discover_scenes():
-    # Use the current value of config.config.per_page, which may be overridden by CLI
     """
     Discovers a random batch of scenes to process.
     - Filters scenes that do not yet have a phash
     - Excludes scenes already tagged with hashing_tag, hashing_error_tag, or cover_error_tag
     - Randomly selects one page of scenes to avoid overlap across multiple systems
+    - Uses the current value of config.per_page, which may be overridden by CLI
     """
 
     # Step 1: Query all matching scene IDs (lightweight query, only returns 'id')
@@ -56,7 +56,18 @@ def discover_scenes():
         fragment="id files{id path fingerprints{value type}} paths{screenshot}"
     )
 
-    # Step 6: Apply filemask filter if specified
+    # Step 6: Apply excluded_paths filter if specified
+    if config.excluded_paths:
+        before = len(batch_scenes)
+        batch_scenes = [
+            s for s in batch_scenes
+            if not any(ep in s['files'][0]['path'] for ep in config.excluded_paths)
+        ]
+        excluded = before - len(batch_scenes)
+        if excluded:
+            print(f"🚫 Excluded {excluded} scene(s) matching excluded_paths")
+
+    # Step 7: Apply filemask filter if specified
     if config.filemask:
         filtered_scenes = []
         for scene in batch_scenes:
@@ -75,5 +86,5 @@ def discover_scenes():
 
         return filtered_scenes
 
-    # Step 7: Return the batch of scenes to be processed
+    # Step 8: Return the batch of scenes to be processed
     return batch_scenes

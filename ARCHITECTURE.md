@@ -8,7 +8,7 @@ This document provides detailed technical information about the phashvaapi syste
 - [Processing Pipeline](#processing-pipeline)
 - [Standalone Generation Modes](#standalone-generation-modes)
 - [Marker Generation System](#marker-generation-system)
-- [VAAPI Integration](#vaapi-integration)
+- [Hardware Acceleration](#hardware-acceleration)
 - [Distributed Processing](#distributed-processing)
 - [Error Handling](#error-handling)
 - [Performance Optimizations](#performance-optimizations)
@@ -345,7 +345,11 @@ Example:
 # VAAPI:
 ffmpeg -vaapi_device {device} -ss {seconds} -t 20 -i {video} \
   -vf 'format=nv12,hwupload,scale_vaapi=640:-2' \
-  -c:v h264_vaapi -crf 18 -an {output}
+  -c:v h264_vaapi -global_quality 18 -an {output}
+
+# NVENC:
+ffmpeg -ss {seconds} -t 20 -i {video} \
+  -vf 'scale=640:-2' -c:v h264_nvenc -cq:v 18 -preset p4 -an {output}
 
 # Software fallback:
 ffmpeg -ss {seconds} -t 20 -i {video} \
@@ -373,7 +377,7 @@ ffmpeg -ss {seconds} -i {video} \
 
 ## Standalone Generation Modes
 
-**New in v1.1:** Standalone modes allow generating sprites, previews, and markers without full scene processing.
+Standalone modes allow generating sprites, previews, and markers without full scene processing.
 
 ### Architecture
 
@@ -548,7 +552,26 @@ executor.shutdown(wait=True)
 - Total threads: `max_workers * 5` (1 coordinator + 4 extractors)
 - Recommended: `max_workers = CPU_cores / 2`
 
-## VAAPI Integration
+## Hardware Acceleration
+
+The script supports three encoder paths, resolved once at startup and passed through the entire pipeline.
+
+### Encoder Priority Chain
+
+```
+config.vaapi_override (--vaapi / --novaapi)
+    │
+    ├── Forced ON  → use VAAPI regardless of detection
+    ├── Forced OFF → skip VAAPI
+    └── Not set:
+          config.vaapi == False → skip VAAPI
+          config.vaapi == True  → use auto-detection result
+
+          Then: if vaapi_supported AND config.nvenc AND config.hw_priority == "nvenc"
+                    → disable VAAPI, use NVENC instead
+
+Final order: VAAPI → NVENC → libx264 (software)
+```
 
 ### Architecture Flow
 
@@ -557,9 +580,10 @@ Main Script                Scene Processor              Generators
 ────────────               ───────────────              ──────────
 vaapi_available()  ────►   process_scene()  ────►      VideoSpriteGenerator
     │                          │                            │
-    │ (once at startup)        │                            │
+    │ (once at startup)        │                            │    PreviewVideoGenerator
     ▼                          ▼                            ▼
 (supported, device)    (pass both values)         (use device path)
+                                                       MarkerGenerator
 ```
 
 ### Benefits of Centralized Detection
@@ -576,7 +600,7 @@ vaapi_available()  ────►   process_scene()  ────►      Video
 - **Total: 1 subprocess call per batch!**
 - **2,100 fewer calls = significant performance gain**
 
-### VAAPI FFmpeg Commands
+### FFmpeg Commands by Encoder
 
 **Sprite Frame Extraction (VAAPI):**
 ```bash
@@ -592,7 +616,23 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
 ffmpeg -vaapi_device /dev/dri/renderD128 \
   -ss 30 -i input.mp4 -t 1 \
   -vf 'format=nv12,hwupload,scale_vaapi=640:360' \
-  -c:v h264_vaapi -crf 18 -preset fast \
+  -c:v h264_vaapi -global_quality 18 \
+  -an clip.mp4
+```
+
+**Preview Clip Extraction (NVENC):**
+```bash
+ffmpeg -ss 30 -i input.mp4 -t 1 \
+  -s 640x360 \
+  -c:v h264_nvenc -cq:v 18 -preset p4 \
+  -an clip.mp4
+```
+
+**Preview Clip Extraction (Software):**
+```bash
+ffmpeg -ss 30 -i input.mp4 -t 1 \
+  -s 640x360 \
+  -c:v libx264 -crf 18 -preset slow \
   -an clip.mp4
 ```
 
@@ -601,7 +641,7 @@ ffmpeg -vaapi_device /dev/dri/renderD128 \
 ffmpeg -f concat -i clips.txt \
   -vaapi_device /dev/dri/renderD128 \
   -vf 'format=nv12,hwupload,scale_vaapi=640:360' \
-  -c:v h264_vaapi -crf 18 -preset fast \
+  -c:v h264_vaapi -global_quality 18 \
   -an preview.mp4
 ```
 
@@ -746,17 +786,15 @@ with ThreadPoolExecutor(max_workers=4) as executor:
 ## Future Enhancements
 
 ### Planned Features
-1. **Scene claim timeout** - Auto-reclaim stuck scenes
+1. **Scene claim timeout** - Auto-reclaim stuck scenes after >1 hour
 2. **Progress persistence** - Resume after crash
 3. **Adaptive batch sizing** - Adjust based on error rate
 4. **Health metrics** - Prometheus/Grafana integration
-5. **NVIDIA NVENC support** - Alternative to VAAPI
 
 ### Known Limitations
-1. **Race condition** - Random page selection not perfect
-2. **No retries** - Failed scenes require manual intervention
-3. **No progress bar** - For overall batch completion
-4. **Windows VAAPI** - Limited/no support on Windows
+1. **Race condition** - Random page selection not perfect (mitigated by scene claiming)
+2. **excluded_paths pagination** - Excluded scenes are counted in total/page calculation; a page may return fewer scenes than expected if many are excluded
+3. **Windows VAAPI** - No VAAPI support on Windows; use NVENC instead
 
 ---
 

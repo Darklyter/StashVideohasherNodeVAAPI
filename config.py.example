@@ -1,4 +1,5 @@
-# config.py
+# config.py.example
+# Copy this file to config.py and fill in your values.
 
 import platform
 import os
@@ -11,10 +12,10 @@ windows = platform.system() == "Windows"
 # ─────────────────────────────────────────────
 # Stash API Connection
 # ─────────────────────────────────────────────
-stash_scheme  = "http"           # Protocol: "http" or "https"
-stash_host    = "192.168.1.71"  
+stash_scheme  = "http"    # Protocol: "http" or "https"
+stash_host    = "127.0.0.1"
 stash_port    = 9999
-stash_api_key = None             # Set your API key here (Stash → Settings → Security → API Key)
+stash_api_key = None      # Set your API key here (Stash → Settings → Security → API Key)
 
 # ─────────────────────────────────────────────
 # External Tool Paths
@@ -23,15 +24,15 @@ binary_windows = r".\bin\videohashes-windows.exe"
 binary_linux   = r"./bin/videohashes-linux"
 binary         = binary_windows if windows else binary_linux
 
-ffmpeg  = r"c:\mediatools\ffmpeg.exe"  if windows else "/usr/bin/ffmpeg"
-ffprobe = r"c:\mediatools\ffprobe.exe" if windows else "/usr/bin/ffprobe"
+ffmpeg  = r"c:\path\to\ffmpeg.exe"  if windows else "/usr/bin/ffmpeg"
+ffprobe = r"c:\path\to\ffprobe.exe" if windows else "/usr/bin/ffprobe"
 
 # ─────────────────────────────────────────────
 # Output Paths
 # ─────────────────────────────────────────────
-sprite_path  = r"Y:/stash/generated/vtt"         if windows else "/mnt/stash/stash/generated/vtt"
-preview_path = r"Y:/stash/generated/screenshots" if windows else "/mnt/stash/stash/generated/screenshots"
-marker_path  = r"Y:/stash/generated"             if windows else "/mnt/stash/stash/generated"
+sprite_path  = r"Y:/stash/generated/vtt"         if windows else "/mnt/stash/generated/vtt"
+preview_path = r"Y:/stash/generated/screenshots" if windows else "/mnt/stash/generated/screenshots"
+marker_path  = r"Y:/stash/generated"             if windows else "/mnt/stash/generated"
 
 # ─────────────────────────────────────────────
 # Path Exclusions
@@ -43,26 +44,23 @@ excluded_paths = [
 # ─────────────────────────────────────────────
 # Stash Tag IDs
 # ─────────────────────────────────────────────
-hashing_tag       = 15015  # Stash tag ID for "In Process"      — create these working tags and set numeric IDs here
-hashing_error_tag = 15018  # Stash tag ID for "Hashing Error"   - for example the tag at: `http://stash.local:9999/tags/14800/scenes?sortby=date`
-cover_error_tag   = 15019  # Stash tag ID for "Cover Error"     - the numeric ID would be 14800
+# Create these tags in Stash and paste their numeric IDs here.
+# Find the ID in the URL when viewing a tag: /tags/12345/scenes → ID is 12345
+hashing_tag       = 0  # "In Process"    — scenes actively being worked on
+hashing_error_tag = 0  # "Hashing Error" — phash generation failed
+cover_error_tag   = 0  # "Cover Error"   — cover image extraction failed
 
 # ─────────────────────────────────────────────
 # Path Translations
 # ─────────────────────────────────────────────
-# 'orig' is the path as Stash sees it; 'local' is the path on this machine
+# Map paths as Stash sees them to paths on this machine.
+# Add one entry per mount point that differs between Stash and this node.
+# 'orig' is the path prefix in Stash; 'local' is the equivalent path here.
 translations = (
     [
-        {'orig': '/data/',            'local': 'S:/'},  # If running on Windows
-        {'orig': '/xerxes/',          'local': 'P:/'},  # If running on Windows
-        {'orig': '/data_stranghouse/', 'local': 'R:/'}, # If running on Windows
-        {'orig': '/mnt/gomorrah/',    'local': 'G:/'},  # If running on Windows
+        {'orig': '/mnt/storage/', 'local': 'S:/'},  # Windows example
     ] if windows else [
-        {'orig': '/data/',            'local': '/mnt/strangyr/'},       # If running on Linux
-        {'orig': '/xerxes/',          'local': '/mnt/xerxes/'},         # If running on Linux
-        {'orig': '/data_stranghouse/', 'local': '/mnt/stranghouse/'},   # If running on Linux
-        {'orig': '/mnt/gomorrah/',    'local': '/mnt/gomorrah/'},       # If running on Linux
-        {'orig': '/data_stranghouse/', 'local': '/mnt/Stranghouse/'},   # If running on Linux 
+        {'orig': '/mnt/storage/', 'local': '/mnt/storage/'},  # Linux example
     ]
 )
 
@@ -80,9 +78,9 @@ filemask    = None   # --filemask:     Filter scenes by filename pattern (e.g. '
 # ─────────────────────────────────────────────
 # Hardware Acceleration
 # ─────────────────────────────────────────────
-vaapi       = False     # Enable VAAPI hardware acceleration if detected (Intel/AMD GPUs)
-nvenc       = True      # Enable NVIDIA NVENC hardware encoder (NVIDIA GPUs)
-hw_priority = "vaapi"   # Which encoder takes precedence when both are available: "vaapi" or "nvenc"
+vaapi       = True    # Enable VAAPI hardware acceleration if detected (Intel/AMD GPUs)
+nvenc       = False   # Enable NVIDIA NVENC hardware encoder (NVIDIA GPUs)
+hw_priority = "vaapi" # Which encoder takes precedence when both are available: "vaapi" or "nvenc"
 
 # ─────────────────────────────────────────────
 # Sprite Generation
@@ -101,7 +99,7 @@ preview_skip_seconds  = 15     # Skip this many seconds from the start before sa
 # ─────────────────────────────────────────────
 # Marker Generation
 # ─────────────────────────────────────────────
-generate_markers      = True  # --generate-markers: Enable marker media generation
+generate_markers      = False  # --generate-markers: Enable marker media generation
 marker_batch_size     = 50     # Batch size for standalone marker mode
 
 # Media type toggles (all enabled by default)

@@ -5,7 +5,7 @@ import os
 import shutil
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
-from config import verbose  # ✅ Import verbose flag
+from config import verbose, nvenc
 import time
 from datetime import datetime
 
@@ -48,6 +48,7 @@ class PreviewVideoGenerator:
 
         def extract_clip(i, start_time):
             clip_file = os.path.join(self.temp_dir, f"clip_{i:03d}.mp4")
+            audio_args = ['-c:a', 'aac', '-b:a', '192k'] if self.include_audio else ['-an']
             if use_vaapi:
                 command = [self.ffmpeg,
                     '-vaapi_device', self.vaapi_device,
@@ -56,13 +57,18 @@ class PreviewVideoGenerator:
                     '-t', str(self.clip_length),
                     '-vf', 'format=nv12,hwupload,scale_vaapi=640:360',
                     '-c:v', 'h264_vaapi',
-                    '-crf', '18',
-                    '-preset', 'fast',
-                    '-an',
-                    '-y',
-                    '-loglevel', 'quiet',
-                    clip_file
-                ]
+                    '-global_quality', '18',
+                ] + audio_args + ['-y', '-loglevel', 'quiet', clip_file]
+            elif nvenc:
+                command = [self.ffmpeg,
+                    '-ss', str(start_time),
+                    '-i', self.filename,
+                    '-t', str(self.clip_length),
+                    '-s', '640x360',
+                    '-c:v', 'h264_nvenc',
+                    '-cq:v', '18',
+                    '-preset', 'p4',
+                ] + audio_args + ['-y', '-loglevel', 'quiet', clip_file]
             else:
                 command = [self.ffmpeg,
                     '-ss', str(start_time),
@@ -72,11 +78,7 @@ class PreviewVideoGenerator:
                     '-c:v', 'libx264',
                     '-crf', '18',
                     '-preset', 'slow',
-                    '-an',
-                    '-y',
-                    '-loglevel', 'quiet',
-                    clip_file
-                ]
+                ] + audio_args + ['-y', '-loglevel', 'quiet', clip_file]
             try:
                 subprocess.run(command, check=True)
             except subprocess.CalledProcessError as e:
@@ -111,6 +113,7 @@ class PreviewVideoGenerator:
                 f.write(f"file '{safe_path}'\n")
 
         use_vaapi = self.use_vaapi if self.use_vaapi is not None else False
+        audio_args = ['-c:a', 'aac', '-b:a', '192k'] if self.include_audio else ['-an']
 
         command = [self.ffmpeg]
         if use_vaapi:
@@ -122,12 +125,18 @@ class PreviewVideoGenerator:
                 '-vaapi_device', self.vaapi_device,
                 '-vf', "format=nv12,hwupload,scale_vaapi=640:360",
                 '-c:v', 'h264_vaapi',
-                '-crf', '18',
-                '-preset', 'fast',
-                '-an',
-                '-y',
-                '-loglevel', 'quiet',
-                self.output_path
+                '-global_quality', '18',
+            ])
+        elif nvenc:
+            # NVENC (NVIDIA GPU) pipeline
+            command.extend([
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', concat_file,
+                '-vf', "scale=640:360",
+                '-c:v', 'h264_nvenc',
+                '-cq:v', '18',
+                '-preset', 'p4',
             ])
         else:
             # Software encoding pipeline
@@ -139,11 +148,9 @@ class PreviewVideoGenerator:
                 '-c:v', 'libx264',
                 '-crf', '18',
                 '-preset', 'slow',
-                '-an',
-                '-y',
-                '-loglevel', 'quiet',
-                self.output_path
             ])
+        command.extend(audio_args)
+        command.extend(['-y', '-loglevel', 'quiet', self.output_path])
 
         try:
             subprocess.run(command, check=True)

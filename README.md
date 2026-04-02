@@ -1,390 +1,327 @@
-# 📼 StashVideohasherNode (VAAPI) - VAAPI-Accelerated Stash Video Processor
+# 📼 StashVideohasherNode (VAAPI)
 
-A lightweight, distributed processing script that takes the heavy lifting off your Stash server. Instead of making your Stash instance do all the work, spread it across multiple nodes that can contribute back cover generation, sprite sheets, preview videos, and perceptual hashing. Now with GPU acceleration to make it even faster.
+Got a big Stash library? This script takes the heavy lifting off your Stash server by spreading video processing across as many machines as you want. Each node grabs a batch of unprocessed scenes, does the work, and reports back — with full GPU acceleration to keep things fast.
 
-## ⚙️ Requirements
+## What it does
 
-### The Essentials
-- Python 3.7+ (you probably already have this)
+For each unprocessed scene it finds, the script can generate:
+
+- **Perceptual hash (phash)** — visual fingerprint for your video, used for matching with Stashboxes and finding duplicate videos across your library
+- **Cover image** — extracted from the video if you don't have one
+- **Sprite sheet** — 9×9 thumbnail grid with WebVTT for timeline scrubbing
+- **Preview video** — 15-second highlight reel (15 × 1s clips)
+- **Marker media** — MP4 clips, WebP animations, and JPG screenshots for each scene marker
+
+Everything runs in parallel, one scene won't block another, and a failed scene gets tagged for later review rather than crashing the batch.
+
+> **Note:** This script uses **OSHASH** fingerprinting. If your Stash instance is set to MD5, make sure to switch it to OSHASH in Settings before running.
+
+---
+
+## Requirements
+
+- Python 3.7+
 - FFmpeg (with VAAPI support if you want GPU acceleration)
-- [Peolic's videohashes binaries](https://github.com/peolic/videohashes) - grab the right one for your OS
+- [Peolic's videohashes binary](https://github.com/peolic/videohashes) — grab the right one for your OS
 
-### Python Packages
 ```bash
 pip install stashapi Pillow tqdm
 ```
 
-**Quick note:** This script uses **OSHASH** for file fingerprinting. If your Stash instance is currently set to MD5, these won't be compatible. Switch to OSHASH in your Stash settings.
+---
 
-## 🧠 How It Works
+## Setup
 
-The script is designed to let multiple systems chip in on processing your Stash library:
+### 1. Point it at your Stash server
 
-- Processes scenes in configurable batches (default: 25 per node)
-- Uses tag-based "claiming" to prevent multiple nodes from working on the same scenes
-- Keeps going until all scenes are processed
-- Targets scenes with **missing phash** (once a scene has a phash, it's done)
-- If phash succeeds but something else fails (like cover extraction), the scene still gets skipped next time
-
-### What Gets Generated
-
-1. **Perceptual Hash (phash)** - For finding duplicate videos
-2. **Cover Image** - Extracted from the video if you don't have one
-3. **Sprite Sheet** - 9×9 grid of thumbnails with WebVTT metadata for scrubbing
-4. **Preview Video** - 15-second compilation (15 clips × 1 second each)
-5. **Marker Media** - MP4 previews (20s clips), WebP thumbnails (5s animations), and JPG screenshots for scene markers
-
-## 🚀 Hardware Acceleration (VAAPI)
-
-If you've got an Intel or AMD GPU, this script can use VAAPI to massively speed up preview and sprite generation. It auto-detects your GPU at startup, but you can override:
-
-```bash
-# Force VAAPI on
-python phash_videohasher_main.py --vaapi
-
-# Force VAAPI off (software encoding)
-python phash_videohasher_main.py --novaapi
-```
-
-**Performance difference?** On a batch of 3 videos:
-- WITH VAAPI: 1m30s (37% faster, 52% less CPU usage)
-- WITHOUT VAAPI: 2m23s
-
-Your mileage may vary, but GPU acceleration is a game-changer for large batches.
-
-## 🛠️ Setup
-
-### 1. Configure Your Stash Connection
-
-Edit `config.py` and point it at your Stash server:
+Open `config.py` and fill in your connection details:
 
 ```python
-stash_host = "127.0.0.1"       # Your Stash server IP
-stash_port = 9999               # Your Stash port
-stash_api_key = None            # Set to your API key if authentication is required
+stash_scheme  = "http"          # "http" or "https"
+stash_host    = "127.0.0.1"    # Your Stash server IP or hostname
+stash_port    = 9999            # Your Stash port
+stash_api_key = None            # Paste your API key here if Stash requires auth
 ```
 
-**API Key Authentication (Optional):**
+To get your API key: Stash → **Settings → Security** → copy or generate the key.
 
-If your Stash instance requires authentication, set the API key:
+### 2. Set your output paths
+
+Tell the script where your Stash-generated files live:
+
 ```python
-stash_api_key = "your-api-key-here"
+sprite_path  = "/mnt/stash/stash/generated/vtt"
+preview_path = "/mnt/stash/stash/generated/screenshots"
+marker_path  = "/mnt/stash/stash/generated"   # markers saved under markers/{oshash}/
 ```
 
-To get your Stash API key:
-1. Open Stash web interface
-2. Go to **Settings → Security**
-3. Find or generate your API key
-4. Copy the key and set it in `config.py`
+### 3. Add your tag IDs
 
-### 2. Set Up Path Translations (if needed)
+The script uses Stash tags to track which scenes are in-progress and which had errors. Create these tags in Stash and drop their IDs here:
 
-If you're running this on a different machine than your Stash server, you'll need to translate the file paths:
+```python
+hashing_tag       = 15015   # "In Process" — claimed by a node, don't touch
+hashing_error_tag = 15018   # "Phash Error" — hashing failed
+cover_error_tag   = 15019   # "Cover Error" — cover extraction failed
+```
+
+### 4. Path translation (multi-machine setups)
+
+If this node and your Stash server see the same files at different paths, add translations:
 
 ```python
 translations = [
     {'orig': '/mnt/storage/', 'local': '/mnt/nas/'},
-    # Add more as needed
 ]
 ```
 
-### 3. Configure Tag IDs
+### 5. Run the health check
 
-The script uses Stash tags to track processing state. You'll need to create these tags in Stash and put their IDs in `config.py`:
-
-```python
-hashing_tag = 15015        # "In Process" tag
-hashing_error_tag = 15018  # "Phash Error" tag
-cover_error_tag = 15019    # "Cover Error" tag
-```
-
-### 4. Set Output Paths
-
-Tell the script where to save sprites, previews, and markers:
-
-```python
-sprite_path = "/mnt/stash/stash/generated/vtt"
-preview_path = "/mnt/stash/stash/generated/screenshots"
-marker_path = "/mnt/stash/stash/generated"  # Markers go in markers/{oshash}/
-```
-
-### 5. Configure Marker Generation (Optional)
-
-Marker generation is disabled by default. Configure in `config.py`:
-
-```python
-# Enable marker generation
-generate_markers = True  # or use --generate-markers CLI flag
-
-# Media type toggles (all enabled by default)
-marker_preview_enabled = True         # Generate MP4 previews (20s clips)
-marker_thumbnail_enabled = True       # Generate WebP thumbnails (5s animations)
-marker_screenshot_enabled = True      # Generate JPG screenshots (single frames)
-
-# Media generation parameters
-marker_preview_duration = 20          # MP4 clip duration in seconds
-marker_thumbnail_duration = 5         # WebP animation duration in seconds
-marker_thumbnail_fps = 12             # WebP animation frame rate
-marker_batch_size = 50                # Batch size for standalone marker mode
-```
-
-**Marker file structure:**
-```
-{marker_path}/markers/{oshash}/{seconds}.{mp4|webp|jpg}
-
-Example:
-/mnt/stash/stash/generated/markers/abc123def456/15.mp4
-/mnt/stash/stash/generated/markers/abc123def456/15.webp
-/mnt/stash/stash/generated/markers/abc123def456/15.jpg
-```
-
-### 6. Run Health Check
-
-Make sure everything's configured correctly:
+Before your first real run, make sure everything is wired up correctly:
 
 ```bash
 python phash_videohasher_main.py --health-check
 ```
 
-If all checks pass ✅, you're ready to roll.
+This validates your Stash connection, checks that FFmpeg and the videohashes binary are available, confirms output paths are writable, and does a real test encode on whichever GPU encoder you have configured. All green? You're ready to go.
 
-## 🎮 Usage
+---
 
-### Basic Usage
+## GPU Acceleration
 
-Process scenes with default settings (phash + cover only):
-```bash
-python phash_videohasher_main.py
+The script auto-detects VAAPI at startup and picks the best encoder automatically. You can also override it from the CLI or lock it in via config.
+
+### VAAPI (Intel / AMD)
+
+```python
+vaapi = True   # Use VAAPI if detected (default)
 ```
 
-### Integrated Scene Processing
-
-Process scenes with all media generation during scene processing:
 ```bash
-# Full processing (phash + cover + sprite + preview + markers)
-python phash_videohasher_main.py --generate-sprite --generate-preview --generate-markers --once --verbose
+python phash_videohasher_main.py --vaapi    # force on
+python phash_videohasher_main.py --novaapi  # force off
+```
 
-# Single batch for testing
-python phash_videohasher_main.py --once --verbose --batch-size 5
+### NVENC (NVIDIA)
 
-# Process specific videos (by filename pattern)
+```python
+nvenc = True   # Enable NVENC (default: False)
+```
+
+```bash
+python phash_videohasher_main.py --nvenc
+```
+
+### When both are available
+
+```python
+hw_priority = "vaapi"   # "vaapi" (default) or "nvenc"
+```
+
+```bash
+python phash_videohasher_main.py --hw-priority nvenc
+```
+
+Encoder resolution order: **VAAPI → NVENC → libx264**
+
+On a batch of 3 videos, VAAPI was 37% faster and used 52% less CPU. Your mileage will vary, but GPU acceleration is worth enabling if you have it.
+
+---
+
+## Usage
+
+### The basics
+
+**Phash is always generated** — it's the core job and runs unconditionally whenever a scene is processed. You don't need a flag for it.
+
+Sprite and preview generation follow the `generate_sprite` and `generate_preview` settings in `config.py` (both default to `True`). Marker generation is off by default and must be enabled via config or `--generate-markers`. The CLI flags force these on regardless of config.
+
+```bash
+# Default run — phash + cover + whatever is enabled in config.py, loops until done
+python phash_videohasher_main.py
+
+# Force all generation on, regardless of config
+python phash_videohasher_main.py --generate-sprite --generate-preview --generate-markers
+
+# Run one batch and exit (good for cron)
+python phash_videohasher_main.py --once --batch-size 25
+
+# Test on a small sample first
+python phash_videohasher_main.py --once --batch-size 5 --verbose
+
+# Filter to specific files
 python phash_videohasher_main.py --filemask "JoonMali*" --generate-sprite --generate-preview --once
 ```
 
-### Standalone Generation Modes
+### Generate missing media in bulk
 
-Generate media without full scene processing:
+The integrated flags (`--generate-sprite`, `--generate-preview`, `--generate-markers`) only run during scene processing — they won't touch scenes that already have a phash. If you want to backfill sprites, previews, or marker media for scenes that were already hashed, use the standalone modes instead. These search for scenes missing specific media regardless of phash status:
 
-**Generate sprites only (50 scenes):**
 ```bash
+# Generate missing sprites (50 at a time)
 python phash_videohasher_main.py --standalone-sprites --sprite-batch-size 50 --verbose
-```
 
-**Generate previews only (25 scenes):**
-```bash
+# Generate missing previews (25 at a time)
 python phash_videohasher_main.py --standalone-previews --preview-batch-size 25 --verbose
-```
 
-**Generate marker media only (100 markers):**
-```bash
+# Generate missing marker media (100 at a time)
 python phash_videohasher_main.py --standalone-markers --marker-batch-size 100 --verbose
+
+# Run all three at once
+python phash_videohasher_main.py --standalone-sprites --standalone-previews --standalone-markers
 ```
 
-**Combined standalone generation:**
+You can also generate only specific types of marker media:
+
 ```bash
-# Generate all three types at once
-python phash_videohasher_main.py --standalone-sprites --standalone-previews --standalone-markers --verbose
+python phash_videohasher_main.py --standalone-markers --marker-preview-only     # MP4 clips only
+python phash_videohasher_main.py --standalone-markers --marker-thumbnail-only   # WebP animations only
+python phash_videohasher_main.py --standalone-markers --marker-screenshot-only  # JPG screenshots only
 ```
 
-**Marker media type filters:**
+### Error recovery
+
 ```bash
-# Generate only MP4 previews (20-second clips)
-python phash_videohasher_main.py --standalone-markers --marker-preview-only --verbose
-
-# Generate only WebP thumbnails (5-second animations)
-python phash_videohasher_main.py --standalone-markers --marker-thumbnail-only --verbose
-
-# Generate only JPG screenshots (single frames)
-python phash_videohasher_main.py --standalone-markers --marker-screenshot-only --verbose
-```
-
-### Common Patterns
-
-**Retry scenes that had errors:**
-```bash
+# Retry scenes that previously failed
 python phash_videohasher_main.py --retry-errors
+
+# Clear all error tags to start completely fresh
+python phash_videohasher_main.py --clear-error-tags
 ```
 
-**Run as a cron job/service:**
-```bash
-python phash_videohasher_main.py --batch-size 50 --once
-```
+### See what it would do
 
-**See what it would do (dry run):**
 ```bash
 python phash_videohasher_main.py --dry-run --verbose --once
 python phash_videohasher_main.py --standalone-markers --dry-run --verbose
 ```
 
-## 📋 CLI Options
+---
 
-Run `python phash_videohasher_main.py --help` for complete usage information.
+## Marker Generation
 
-### Basic Options
-```
---batch-size BATCH_SIZE     Number of scenes per batch (default: 25)
---max-workers MAX_WORKERS   Parallel worker threads (default: 4)
---once                      Process one batch and exit (great for cron)
---verbose                   Show progress bars and detailed output
---debug                     Show FFmpeg commands and timing breakdowns
---dry-run                   Simulate processing without making changes
---filemask FILEMASK         Filter scenes by filename pattern (e.g., 'JoonMali*' or '*.mp4')
---windows                   Use Windows paths and binaries
-```
+Marker generation is off by default. Turn it on in `config.py` or with the `--generate-markers` flag:
 
-### Integrated Scene Processing
-Enable media generation during full scene processing:
-```
---generate-sprite           Generate sprite sheets during scene processing
---generate-preview          Generate preview videos during scene processing
---generate-markers          Generate marker media during scene processing
+```python
+generate_markers = True
+
+# What to generate (all on by default)
+marker_preview_enabled    = True   # 20-second MP4 clips
+marker_thumbnail_enabled  = True   # 5-second WebP animations
+marker_screenshot_enabled = True   # Single JPG frames
+
+# Timing and quality
+marker_preview_duration   = 20     # MP4 clip length in seconds
+marker_thumbnail_duration = 5      # WebP animation length in seconds
+marker_thumbnail_fps      = 12     # WebP frame rate
+marker_batch_size         = 50     # Batch size for standalone marker mode
 ```
 
-### Standalone Generation Modes
-Generate media without full scene processing:
-```
---standalone-sprites        Batch generate sprites only
---sprite-batch-size SIZE    Batch size for standalone sprite generation (default: 25)
-
---standalone-previews       Batch generate previews only
---preview-batch-size SIZE   Batch size for standalone preview generation (default: 25)
-
---standalone-markers        Batch generate markers only
---marker-batch-size SIZE    Batch size for standalone marker generation (default: 50)
-```
-
-### Marker Generation Options
-```
---marker-preview-only       Generate only MP4 previews (20s clips)
---marker-thumbnail-only     Generate only WebP thumbnails (5s animations)
---marker-screenshot-only    Generate only JPG screenshots (single frames)
-```
-
-### Hardware Acceleration
-```
---vaapi                     Force VAAPI hardware acceleration ON
---novaapi                   Force VAAPI hardware acceleration OFF
-```
-
-### Utilities
-```
---health-check              Validate configuration and exit
---retry-errors              Process scenes that previously failed
---clear-error-tags          Remove error tags from all scenes and exit
-```
-
-## 🏥 Health Checks
-
-Before doing any real work, the script validates:
-- ✅ Stash API is reachable
-- ✅ videohashes binary exists and is executable
-- ✅ FFmpeg and ffprobe are available
-- ✅ Output directories are writable
-- ✅ VAAPI device is accessible (if enabled)
-- ✅ Temp directory can be created
-
-Run standalone with:
-```bash
-python phash_videohasher_main.py --health-check
-```
-
-## 📊 Statistics & Monitoring
-
-With `--verbose`, you get a summary after each batch:
+Marker files are saved alongside your other generated media:
 
 ```
-📊 Batch Summary
-============================================================
-  ✅ Successful: 23/25 (92.0%)
-  ❌ Failed: 2/25
-  ⏱️  Average time per scene: 36.2s
-  🎯 Total processing time: 15m 4s
-============================================================
+{marker_path}/markers/{oshash}/{seconds}.mp4
+{marker_path}/markers/{oshash}/{seconds}.webp
+{marker_path}/markers/{oshash}/{seconds}.jpg
 ```
 
-Failed scenes are tagged with error tags and logged to `error_log.txt` for later review.
+---
 
-## 🔧 Error Handling
+## CLI Reference
 
-### Automatic Isolation
-Each scene processes independently - one failure won't crash the whole batch.
+```
+Core options:
+  --batch-size N        Scenes per batch (default: 25)
+  --max-workers N       Parallel worker threads (default: 4)
+  --once                Process one batch and exit
+  --verbose             Progress bars and detailed output
+  --debug               FFmpeg commands and timing breakdowns
+  --dry-run             Simulate without making changes
+  --filemask PATTERN    Filter scenes by filename (e.g. 'JoonMali*')
+  --windows             Use Windows paths and binaries
 
-### Error Tags
-- Scenes that fail hashing get the `hashing_error_tag`
-- Scenes that fail cover extraction get the `cover_error_tag`
-- Both are excluded from future processing until you explicitly retry
+Integrated scene processing (only runs on scenes missing a phash):
+  --generate-sprite     Force sprite generation on during scene processing
+  --generate-preview    Force preview generation on during scene processing
+  --generate-markers    Force marker generation on during scene processing
 
-### Retry Failed Scenes
-```bash
-# Process only scenes with error tags
-python phash_videohasher_main.py --retry-errors --batch-size 10 --once
+Standalone modes (runs regardless of phash status — use to backfill existing scenes):
+  --standalone-sprites          Generate missing sprites only
+  --sprite-batch-size N         Batch size (default: 25)
+  --standalone-previews         Generate missing previews only
+  --preview-batch-size N        Batch size (default: 25)
+  --standalone-markers          Generate missing marker media only
+  --marker-batch-size N         Batch size (default: 50)
+  --marker-preview-only         MP4 clips only
+  --marker-thumbnail-only       WebP animations only
+  --marker-screenshot-only      JPG screenshots only
 
-# Clear all error tags to start fresh
-python phash_videohasher_main.py --clear-error-tags
+Hardware acceleration:
+  --vaapi                       Force VAAPI on
+  --novaapi                     Force VAAPI off
+  --nvenc                       Enable NVIDIA NVENC
+  --hw-priority {vaapi,nvenc}   Which encoder wins when both are available
+
+Utilities:
+  --health-check        Validate config and exit
+  --retry-errors        Process scenes with error tags
+  --clear-error-tags    Remove all error tags and exit
 ```
 
-### Timeout Protection
-Each scene has a 10-minute timeout to prevent hanging on problem videos. If a scene times out, it gets tagged with an error and the batch continues.
+---
 
-## 🌐 Distributed Processing
+## Running on multiple machines
 
-Run this script on multiple machines to process your library faster. The tag-based claiming system prevents overlap:
+This is where it really shines. Each node claims a batch of scenes via Stash tags, processes them, and releases the claims when done. Other nodes skip anything that's already claimed.
 
-1. Node A claims scenes 1-25 (adds "In Process" tag)
-2. Node B sees those are claimed, picks scenes 26-50
+1. Node A claims scenes 1–25 (adds "In Process" tag)
+2. Node B sees those as claimed, picks scenes 26–50
 3. When Node A finishes a scene, it removes the tag
-4. Scene becomes eligible for processing again only if it still needs work
+4. That scene is only eligible again if it still needs work
 
-**Note:** There's a small race condition window during random page selection, but scene claiming mitigates it almost entirely.
+There's a small race window during random page selection, but the claiming system covers it almost entirely in practice.
 
-## 🐛 Troubleshooting
+---
 
-### Terminal text invisible after run
-Fixed! The script now properly resets terminal state including colors, cursor, and echo mode.
+## Error Handling
 
-### Leftover temp directories
-All temp files go in `.tmp/` which is automatically cleaned at the start and end of each run.
+**One failure won't take down the batch.** Each scene processes independently. If something goes wrong:
 
-### VAAPI not working
-Run `--health-check` to verify your VAAPI device is accessible. Make sure you have:
-- Intel/AMD GPU with VAAPI drivers installed
-- FFmpeg compiled with VAAPI support
-- Permissions to access `/dev/dri/renderD128` (or whichever device you have)
+- Phash failures get tagged with `hashing_error_tag`
+- Cover failures get tagged with `cover_error_tag`
+- The failure is logged to `error_log.txt` with a timestamp
+- The scene is skipped in future runs until you explicitly retry it
 
-### Process hangs indefinitely
-Each scene has a 10-minute timeout. If you're seeing hangs, check `error_log.txt` for details.
+Every scene also has a **10-minute timeout**. If a video is hanging for some reason, it gets tagged and the batch continues.
 
-### Error tags piling up
-Review errors in `error_log.txt`, fix any config issues, then:
+---
+
+## Troubleshooting
+
+**VAAPI not working** — Run `--health-check`. Make sure you have Intel/AMD GPU drivers installed, FFmpeg compiled with VAAPI support, and read/write access to `/dev/dri/renderD128` (or whichever device you have).
+
+**Leftover temp directories** — All temp files go in `.tmp/` and are cleaned automatically at the start and end of each run. If something was interrupted, just run the script again and it'll clean up.
+
+**Error tags piling up** — Check `error_log.txt` to see what failed, fix any config issues, then:
 ```bash
 python phash_videohasher_main.py --clear-error-tags
 python phash_videohasher_main.py --retry-errors
 ```
 
-## 💬 Support
-
-The code is heavily commented. If you're stuck, you can probably figure it out from reading the source. For questions, you know where to find me on Discord (if you know this script exists, you probably know how to reach me there).
-
-## 📜 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## 🙏 Credits
-
-- [Stash](https://github.com/stashapp/stash) - The adult media organizer this script was built for
-- [Peolic's videohashes](https://github.com/peolic/videohashes) - The perceptual hashing engine
-- Everyone who contributed bug reports and testing feedback
+**Process hangs** — The 10-minute timeout per scene should prevent this. If you're still seeing hangs, check `error_log.txt` for details on which scenes are timing out.
 
 ---
 
-**Pro tip:** Run this on multiple systems, set `--batch-size 50`, schedule it with cron, and let it churn through your backlog overnight. Your Stash server will thank you. 🚀
+## License
+
+MIT — see [LICENSE](LICENSE)
+
+## Credits
+
+- [Stash](https://github.com/stashapp/stash) — the media organizer this was built for
+- [Peolic's videohashes](https://github.com/peolic/videohashes) — the perceptual hashing engine
+- Everyone who filed bugs and tested fixes
+
+---
+
+**Pro tip:** Run this on a few machines simultaneously, set `--batch-size 50`, schedule it with cron, and let it work through your backlog overnight.

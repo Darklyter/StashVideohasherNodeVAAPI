@@ -76,7 +76,8 @@ desktop.ini
 test_*.py
 *_test.py
 
-# Local configuration overrides (if you create them)
+# Local configuration (contains credentials and machine-specific paths)
+config.py
 config_local.py
 local_config.py
 

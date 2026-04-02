@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-01
+
+### Added
+- **NVENC hardware encoder support** - NVIDIA GPU acceleration for preview and marker MP4 generation
+  - `config.nvenc` toggle (default: False)
+  - `--nvenc` CLI flag overrides config
+  - Applies to preview clip extraction, concatenation, and marker MP4 previews
+- **Hardware encoder priority** - Control which GPU encoder wins when both VAAPI and NVENC are configured
+  - `config.hw_priority = "vaapi"` (default) or `"nvenc"`
+  - `--hw-priority {vaapi,nvenc}` CLI flag overrides config
+- **VAAPI enable/disable control** - Opt out of VAAPI without using the CLI
+  - `config.vaapi = True/False` (default: True — use VAAPI if detected)
+  - `--vaapi` / `--novaapi` CLI flags still override config at runtime
+- **`excluded_paths` filtering** - Exclude scenes from processing by file path substring
+  - `config.excluded_paths` list (default: empty)
+  - Applied to both batch discovery and total scene count
+- **`stash_scheme` configuration** - Choose `"http"` or `"https"` for the Stash API connection
+- **Functional hardware encode tests in health check** - `--health-check` now performs a real encode using a synthetic video source
+  - VAAPI encode test: verifies ffmpeg can use the GPU (not just that the device file exists)
+  - NVENC encode test: verifies NVIDIA encoder is working
+  - Health check only tests the encoder that will actually be used (respects `hw_priority`)
+
+### Fixed
+- **`include_audio` ignored in preview generator** — `config.preview_audio = True` had no effect; all codec branches (VAAPI, NVENC, libx264) now correctly include or exclude audio
+- **Invalid VAAPI FFmpeg flags** — `h264_vaapi` does not support `-crf` or `-preset`; corrected to `-global_quality` in preview generator and marker generator
+- **`get_total_scene_count()` ignored `excluded_paths`** — count shown to the user was inflated by excluded scenes; now filtered correctly
+- **`debug` not declared in `config.py`** — dynamic attribute risked `AttributeError` if `process_scene` ran without CLI initialization; now declared with default `False`
+- **UnicodeEncodeError crash in `log_scene_failure()`** — bare `print()` could crash on Windows with non-ASCII filenames; now has safe fallback
+- **UnicodeEncodeError crash in `log_marker_failure()`** — same fix applied
+- **Error log written without `encoding="utf-8"`** — could fail on Windows with non-ASCII characters in error messages; fixed in both `tag_scene_error()` and `log_marker_failure()`
+- **Health check tested both encoders regardless of `hw_priority`** — when `hw_priority=vaapi`, NVENC was also tested even though it wouldn't be used; now mutually exclusive
+- **Marker generator VAAPI command used `-crf` flag** — same invalid flag as preview generator; corrected to `-global_quality`
+
+### Changed
+- Hardware encoder resolution now follows a user defined priority chain.  For Example: VAAPI (if active) → NVENC (if configured) → libx264
+- Encoder selection logged at startup with `--verbose`
+- `--vaapi` / `--novaapi` / `--nvenc` help text updated to clarify they override config, not replace it
+- **`benchmarking/preview_benchmark.py` rewritten** — now mirrors `PreviewVideoGenerator` pipeline exactly: VAAPI/NVENC/software encoder selection via `resolve_encoder()`, parallel clip extraction with `ThreadPoolExecutor`, correct VAAPI flags (`-global_quality`), `--all` flag for side-by-side encoder comparison
+- **`benchmarking/sprite_benchmark.py` rewritten** — now mirrors `VideoSpriteGenerator` pipeline exactly: VAAPI device auto-detected and passed through (no hardcoded path), parallel frame extraction with `ThreadPoolExecutor`, correct software command (`-q:v 2`), PIL resize with `Image.Resampling.LANCZOS`, default grid updated to 9×9 (81 frames), `--all` flag for side-by-side comparison
+
 ## [1.1.0] - 2026-03-30
 
 ### Added
@@ -108,6 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **v1.2.0** - NVENC support, hardware encoder priority, excluded paths, audio fix, health check encode tests
 - **v1.1.0** - Marker generation, standalone modes, API key support, and performance fixes
 - **v0.1.0** - Initial release with core functionality
 

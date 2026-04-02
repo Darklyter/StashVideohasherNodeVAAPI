@@ -61,6 +61,63 @@ def check_vaapi_device(vaapi_device):
         return True, f"VAAPI device accessible: {vaapi_device}"
     return True, "VAAPI check skipped (disabled or Windows)"
 
+def check_vaapi_encoding(vaapi_device):
+    """Test a real VAAPI encode using a synthetic source — verifies ffmpeg can use the GPU"""
+    if config.windows:
+        return True, "VAAPI encoding check skipped (Windows)"
+    test_output = os.path.join(os.getcwd(), ".tmp", "vaapi_encode_test.mp4")
+    try:
+        os.makedirs(os.path.dirname(test_output), exist_ok=True)
+        result = subprocess.run([
+            config.ffmpeg,
+            '-f', 'lavfi', '-i', 'testsrc=duration=1:size=128x72:rate=10',
+            '-vaapi_device', vaapi_device,
+            '-vf', 'format=nv12,hwupload,scale_vaapi=128:72',
+            '-c:v', 'h264_vaapi',
+            '-global_quality', '25',
+            '-an', '-y', test_output
+        ], capture_output=True, timeout=30)
+        if result.returncode != 0:
+            error = result.stderr.decode('utf-8', errors='replace').strip().splitlines()[-1]
+            return False, f"VAAPI encode failed: {error}"
+        if not os.path.exists(test_output) or os.path.getsize(test_output) == 0:
+            return False, "VAAPI encode produced no output"
+        return True, f"VAAPI encoding working on {vaapi_device}"
+    except subprocess.TimeoutExpired:
+        return False, "VAAPI encode test timed out"
+    except Exception as e:
+        return False, f"VAAPI encode test error: {e}"
+    finally:
+        if os.path.exists(test_output):
+            os.remove(test_output)
+
+def check_nvenc_encoding():
+    """Test a real NVENC encode using a synthetic source — verifies ffmpeg can use the NVIDIA GPU"""
+    test_output = os.path.join(os.getcwd(), ".tmp", "nvenc_encode_test.mp4")
+    try:
+        os.makedirs(os.path.dirname(test_output), exist_ok=True)
+        result = subprocess.run([
+            config.ffmpeg,
+            '-f', 'lavfi', '-i', 'testsrc=duration=1:size=128x72:rate=10',
+            '-c:v', 'h264_nvenc',
+            '-cq:v', '25',
+            '-preset', 'p4',
+            '-an', '-y', test_output
+        ], capture_output=True, timeout=30)
+        if result.returncode != 0:
+            error = result.stderr.decode('utf-8', errors='replace').strip().splitlines()[-1]
+            return False, f"NVENC encode failed: {error}"
+        if not os.path.exists(test_output) or os.path.getsize(test_output) == 0:
+            return False, "NVENC encode produced no output"
+        return True, "NVENC encoding working"
+    except subprocess.TimeoutExpired:
+        return False, "NVENC encode test timed out"
+    except Exception as e:
+        return False, f"NVENC encode test error: {e}"
+    finally:
+        if os.path.exists(test_output):
+            os.remove(test_output)
+
 def check_temp_directory():
     """Verify temp directory can be created"""
     try:
@@ -87,6 +144,9 @@ def run_health_check(vaapi_device=None):
 
     if vaapi_device:
         checks.append(("VAAPI Device", lambda: check_vaapi_device(vaapi_device)))
+        checks.append(("VAAPI Encoding", lambda: check_vaapi_encoding(vaapi_device)))
+    elif config.nvenc:
+        checks.append(("NVENC Encoding", check_nvenc_encoding))
 
     results = []
     all_passed = True
