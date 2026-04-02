@@ -6,6 +6,10 @@ stashapp-tools>=0.2.0
 # Image processing
 Pillow>=9.0.0
 
+# Perceptual hash computation — required when phash_backend = "internal" in config.py
+numpy>=1.20.0
+scipy>=1.7.0
+
 # Progress bars and CLI formatting
 tqdm>=4.60.0
 

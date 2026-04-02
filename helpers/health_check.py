@@ -15,14 +15,22 @@ def check_stash_connection():
     except Exception as e:
         return False, f"Stash API connection failed: {e}"
 
-def check_binary_exists():
-    """Verify videohashes binary exists and is executable"""
-    binary_path = config.binary
-    if not os.path.exists(binary_path):
-        return False, f"Binary not found: {binary_path}"
-    if not os.access(binary_path, os.X_OK):
-        return False, f"Binary not executable: {binary_path}"
-    return True, f"Binary found and executable: {binary_path}"
+def check_phash_backend():
+    """Verify the configured phash backend is ready"""
+    if config.phash_backend == "binary":
+        binary_path = config.binary
+        if not os.path.exists(binary_path):
+            return False, f"Binary not found: {binary_path}"
+        if not os.access(binary_path, os.X_OK):
+            return False, f"Binary not executable: {binary_path}"
+        return True, f"Binary found: {binary_path}"
+    else:
+        try:
+            import numpy
+            import scipy
+            return True, f"Python phash ready (numpy {numpy.__version__}, scipy {scipy.__version__})"
+        except ImportError as e:
+            return False, f"Missing dependency: {e} — run: pip install numpy scipy"
 
 def check_ffmpeg_available():
     """Verify ffmpeg and ffprobe are available"""
@@ -136,7 +144,7 @@ def run_health_check(vaapi_device=None):
     """Run all health checks and return results"""
     checks = [
         ("Stash API Connection", check_stash_connection),
-        ("Videohashes Binary", check_binary_exists),
+        ("PHash Backend", check_phash_backend),
         ("FFmpeg/FFprobe", check_ffmpeg_available),
         ("Output Paths", check_output_paths),
         ("Temp Directory", check_temp_directory),

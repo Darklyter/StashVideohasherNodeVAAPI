@@ -9,11 +9,11 @@ import base64
 import random
 import requests
 import shutil
-from json.decoder import JSONDecodeError
 from datetime import datetime
 
 from helpers.video_sprite_generator import VideoSpriteGenerator
 from helpers.preview_video_generator import PreviewVideoGenerator
+from helpers.phash_generator import compute_phash
 
 from config import (
     windows, binary, ffmpeg, ffprobe,
@@ -75,19 +75,23 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
 
         if config.debug:
             print(f"🟡 [DEBUG] Starting phash generation for {filename_pretty}")
-            print(f"🟡 [DEBUG] CLI: {binary} -json '{filename}'")
+            if config.phash_backend == "binary":
+                print(f"🟡 [DEBUG] CLI: {binary} -json '{filename}'")
             phash_start = time.time()
         if dry_run:
-            print(f"[DRY RUN] Would run videohash on {filename}")
+            print(f"[DRY RUN] Would compute phash for {filename}")
             performed_options.append("phash (dry run)")
             if config.debug:
                 phash_elapsed = time.time() - phash_start
                 print(f"🟡 [DEBUG] Finished phash generation for {filename_pretty} in {phash_elapsed:.2f} seconds")
         else:
             try:
-                result = subprocess.run([binary, '-json', filename], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
-                results = json.loads(result.stdout.decode("utf-8"))
-                update_phash(file_id, results['phash'])
+                if config.phash_backend == "binary":
+                    proc = subprocess.run([binary, '-json', filename], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+                    phash = json.loads(proc.stdout.decode("utf-8"))['phash']
+                else:
+                    phash = compute_phash(filename, vaapi_device=vaapi_device)['phash']
+                update_phash(file_id, phash)
                 performed_options.append("phash")
                 if config.debug:
                     phash_elapsed = time.time() - phash_start

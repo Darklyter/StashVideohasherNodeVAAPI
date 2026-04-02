@@ -22,11 +22,12 @@ Everything runs in parallel, one scene won't block another, and a failed scene g
 
 - Python 3.7+
 - FFmpeg (with VAAPI support if you want GPU acceleration)
-- [Peolic's videohashes binary](https://github.com/peolic/videohashes) — grab the right one for your OS
 
 ```bash
 pip install stashapi Pillow tqdm
 ```
+
+Phash generation uses the internal pure-Python implementation by default. If you prefer the original videohashes binary, see [PHash Backend](#phash-backend) below.
 
 ---
 
@@ -83,7 +84,35 @@ Before your first real run, make sure everything is wired up correctly:
 python phash_videohasher_main.py --health-check
 ```
 
-This validates your Stash connection, checks that FFmpeg and the videohashes binary are available, confirms output paths are writable, and does a real test encode on whichever GPU encoder you have configured. All green? You're ready to go.
+This validates your Stash connection, checks that the configured phash backend is ready, confirms output paths are writable, and does a real test encode on whichever GPU encoder you have configured. All green? You're ready to go.
+
+---
+
+## PHash Backend
+
+Phash generation supports two backends, controlled by `phash_backend` in `config.py`:
+
+### Internal (default)
+
+```python
+phash_backend = "internal"
+```
+
+Pure-Python implementation — no binary needed. Requires numpy and scipy:
+
+```bash
+pip install numpy scipy
+```
+
+Implements the same algorithm as goimagehash (the library Stash uses internally), validated against a library of stored hashes. VAAPI hardware decode is used for frame extraction when available.
+
+### Videohashes binary
+
+```python
+phash_backend = "binary"
+```
+
+Uses [Peolic's videohashes binary](https://github.com/peolic/videohashes). Download the right executable for your OS into the `bin/` directory. No additional Python dependencies required.
 
 ---
 
@@ -338,7 +367,8 @@ MIT — see [LICENSE](LICENSE)
 ## Credits
 
 - [Stash](https://github.com/stashapp/stash) — the media organizer this was built for
-- [Peolic's videohashes](https://github.com/peolic/videohashes) — the perceptual hashing engine
+- [goimagehash](https://github.com/corona10/goimagehash) — the perceptual hash algorithm this implements
+- [Peolic's videohashes](https://github.com/peolic/videohashes) — alternative binary backend
 - Everyone who filed bugs and tested fixes
 
 ---

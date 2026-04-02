@@ -76,6 +76,10 @@ desktop.ini
 test_*.py
 *_test.py
 
+# Benchmark data files
+benchmarking/*.json
+benchmarking/phash_python_benchmark.py
+
 # Local configuration (contains credentials and machine-specific paths)
 config.py
 config_local.py

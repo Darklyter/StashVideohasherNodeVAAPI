@@ -17,12 +17,17 @@ stash_port    = 9999
 stash_api_key = None             # Set your API key here (Stash → Settings → Security → API Key)
 
 # ─────────────────────────────────────────────
-# External Tool Paths
+# PHash Backend
 # ─────────────────────────────────────────────
+phash_backend  = "internal"                   # "internal" (pure-Python, no binary needed)
+                                              # "binary"   (peolic/videohashes executable)
 binary_windows = r".\bin\videohashes-windows.exe"
 binary_linux   = r"./bin/videohashes-linux"
 binary         = binary_windows if windows else binary_linux
 
+# ─────────────────────────────────────────────
+# External Tool Paths
+# ─────────────────────────────────────────────
 ffmpeg  = r"c:\mediatools\ffmpeg.exe"  if windows else "/usr/bin/ffmpeg"
 ffprobe = r"c:\mediatools\ffprobe.exe" if windows else "/usr/bin/ffprobe"
 
