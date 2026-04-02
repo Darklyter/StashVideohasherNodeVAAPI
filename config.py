@@ -80,8 +80,8 @@ filemask    = None   # --filemask:     Filter scenes by filename pattern (e.g. '
 # ─────────────────────────────────────────────
 # Hardware Acceleration
 # ─────────────────────────────────────────────
-vaapi       = False     # Enable VAAPI hardware acceleration if detected (Intel/AMD GPUs)
-nvenc       = True      # Enable NVIDIA NVENC hardware encoder (NVIDIA GPUs)
+vaapi       = True     # Enable VAAPI hardware acceleration if detected (Intel/AMD GPUs)
+nvenc       = False      # Enable NVIDIA NVENC hardware encoder (NVIDIA GPUs)
 hw_priority = "vaapi"   # Which encoder takes precedence when both are available: "vaapi" or "nvenc"
 
 # ─────────────────────────────────────────────

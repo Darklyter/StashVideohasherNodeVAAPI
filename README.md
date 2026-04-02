@@ -50,9 +50,9 @@ To get your API key: Stash → **Settings → Security** → copy or generate th
 Tell the script where your Stash-generated files live:
 
 ```python
-sprite_path  = "/mnt/stash/stash/generated/vtt"
-preview_path = "/mnt/stash/stash/generated/screenshots"
-marker_path  = "/mnt/stash/stash/generated"   # markers saved under markers/{oshash}/
+sprite_path  = "/mnt/stash/generated/vtt"
+preview_path = "/mnt/stash/generated/screenshots"
+marker_path  = "/mnt/stash/generated"   # markers saved under markers/{oshash}/
 ```
 
 ### 3. Add your tag IDs
@@ -124,7 +124,17 @@ python phash_videohasher_main.py --hw-priority nvenc
 
 Encoder resolution order: **VAAPI → NVENC → libx264**
 
-On a batch of 3 videos, VAAPI was 37% faster and used 52% less CPU. Your mileage will vary, but GPU acceleration is worth enabling if you have it.
+### Performance comparison
+
+Benchmarked on a batch of 25 comparable scenes:
+
+| Encoder | Avg time/scene | Total (25 scenes) | vs VAAPI |
+|---------|---------------|-------------------|----------|
+| VAAPI   | 100.7s        | 10m 53s           | baseline |
+| NVENC   | 154.5s        | 16m 43s           | +53%     |
+| libx264 | (CPU-bound)   | —                 | slower   |
+
+VAAPI came out ~35% faster than NVENC on this hardware. Results will vary depending on your GPU generation, driver version, and video characteristics — but GPU acceleration over software is always worth enabling if you have it.
 
 ---
 
@@ -299,6 +309,23 @@ Every scene also has a **10-minute timeout**. If a video is hanging for some rea
 ## Troubleshooting
 
 **VAAPI not working** — Run `--health-check`. Make sure you have Intel/AMD GPU drivers installed, FFmpeg compiled with VAAPI support, and read/write access to `/dev/dri/renderD128` (or whichever device you have).
+
+Setting up VAAPI on Ubuntu:
+
+- **Intel (Broadwell and newer):** Install `intel-media-va-driver` (or `intel-media-va-driver-non-free` for additional codec support), then verify with `vainfo`. See the [intel/media-driver](https://github.com/intel/media-driver) repo for supported hardware.
+  ```bash
+  sudo apt install intel-media-va-driver vainfo
+  ```
+- **Intel (older / Haswell and below):** Use `i965-va-driver` instead.
+  ```bash
+  sudo apt install i965-va-driver vainfo
+  ```
+- **AMD:** VAAPI support is included in Mesa — install `mesa-va-drivers` and the AMDGPU firmware.
+  ```bash
+  sudo apt install mesa-va-drivers vainfo
+  ```
+- **FFmpeg VAAPI guide:** [trac.ffmpeg.org/wiki/Hardware/VAAPI](https://trac.ffmpeg.org/wiki/Hardware/VAAPI) — covers filter graphs, encode/decode support, and troubleshooting FFmpeg-specific issues.
+- **Ubuntu community wiki:** [help.ubuntu.com/community/HardwareVideoAcceleration](https://help.ubuntu.com/community/HardwareVideoAcceleration) — broader overview of VA-API, VDPAU, and NVENC setup on Ubuntu.
 
 **Leftover temp directories** — All temp files go in `.tmp/` and are cleaned automatically at the start and end of each run. If something was interrupted, just run the script again and it'll clean up.
 
