@@ -126,15 +126,7 @@ Encoder resolution order: **VAAPI → NVENC → libx264**
 
 ### Performance comparison
 
-Benchmarked on a batch of 25 comparable scenes:
-
-| Encoder | Avg time/scene | Total (25 scenes) | vs VAAPI |
-|---------|---------------|-------------------|----------|
-| VAAPI   | 100.7s        | 10m 53s           | baseline |
-| NVENC   | 154.5s        | 16m 43s           | +53%     |
-| libx264 | (CPU-bound)   | —                 | slower   |
-
-VAAPI came out ~35% faster than NVENC on this hardware. Results will vary depending on your GPU generation, driver version, and video characteristics — but GPU acceleration over software is always worth enabling if you have it.
+When benchmarked on a batch of 25 comparable scenes VAAPI came out ~35% faster than NVENC. Results will vary depending on your GPU generation, driver version, and video characteristics — but GPU acceleration over software is always worth enabling if you have it.
 
 ---
 
