@@ -35,8 +35,8 @@ def check_phash_backend():
 def check_ffmpeg_available():
     """Verify ffmpeg and ffprobe are available"""
     try:
-        subprocess.run([config.ffmpeg, '-version'], capture_output=True, check=True)
-        subprocess.run([config.ffprobe, '-version'], capture_output=True, check=True)
+        subprocess.run([config.ffmpeg, '-version'], capture_output=True, check=True, timeout=10)
+        subprocess.run([config.ffprobe, '-version'], capture_output=True, check=True, timeout=10)
         return True, "FFmpeg and FFprobe available"
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         return False, f"FFmpeg/FFprobe not available: {e}"
@@ -86,7 +86,8 @@ def check_vaapi_encoding(vaapi_device):
             '-an', '-y', test_output
         ], capture_output=True, timeout=30)
         if result.returncode != 0:
-            error = result.stderr.decode('utf-8', errors='replace').strip().splitlines()[-1]
+            lines = result.stderr.decode('utf-8', errors='replace').strip().splitlines()
+            error = lines[-1] if lines else "no error output"
             return False, f"VAAPI encode failed: {error}"
         if not os.path.exists(test_output) or os.path.getsize(test_output) == 0:
             return False, "VAAPI encode produced no output"
@@ -113,7 +114,8 @@ def check_nvenc_encoding():
             '-an', '-y', test_output
         ], capture_output=True, timeout=30)
         if result.returncode != 0:
-            error = result.stderr.decode('utf-8', errors='replace').strip().splitlines()[-1]
+            lines = result.stderr.decode('utf-8', errors='replace').strip().splitlines()
+            error = lines[-1] if lines else "no error output"
             return False, f"NVENC encode failed: {error}"
         if not os.path.exists(test_output) or os.path.getsize(test_output) == 0:
             return False, "NVENC encode produced no output"

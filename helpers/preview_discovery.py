@@ -4,6 +4,8 @@ import os
 from helpers.stash_utils import stash
 import config
 
+_PAGE_SIZE = 100
+
 def translate_path(docker_path):
     """Translate Stash/Docker paths to local paths using config.translations"""
     for t in config.translations:
@@ -26,59 +28,65 @@ def discover_missing_previews(limit=None):
             - duration: Video duration in seconds
             - scene_title: Scene title for logging
     """
-    from datetime import datetime
-
-    # Query all scenes with file information
-    scenes = stash.find_scenes(
-        f={},  # No filters - get all scenes
-        filter={"per_page": -1},  # Get all at once
-        fragment="id title files { id path fingerprints { type value } } files { duration }"
-    )
-
     missing = []
+    page = 1
 
-    for scene in scenes:
-        scene_id = scene['id']
-        scene_title = scene.get('title', f"Scene {scene_id}")
+    while True:
+        scenes = stash.find_scenes(
+            f={},
+            filter={"per_page": _PAGE_SIZE, "page": page},
+            fragment="id title files { id path fingerprints { type value } duration }"
+        )
 
-        # Extract oshash and video path from scene files
-        oshash = None
-        video_path = None
-        duration = 0
+        if not scenes:
+            break
 
-        for file in scene.get('files', []):
-            video_path = file.get('path')
-            duration = file.get('duration', 0)
+        for scene in scenes:
+            scene_id = scene['id']
+            scene_title = scene.get('title', f"Scene {scene_id}")
 
-            # Find oshash fingerprint
-            for fp in file.get('fingerprints', []):
-                if fp.get('type', '').lower() == 'oshash':
-                    oshash = fp.get('value')
+            oshash = None
+            video_path = None
+            duration = 0
+
+            for file in scene.get('files', []):
+                video_path = file.get('path')
+                duration = file.get('duration', 0)
+
+                for fp in file.get('fingerprints', []):
+                    if fp.get('type', '').lower() == 'oshash':
+                        oshash = fp.get('value')
+                        break
+
+                if oshash:
                     break
 
-            if oshash:
-                break  # Found file with oshash, use it
+            if not oshash or not video_path:
+                continue
 
-        if not oshash or not video_path:
-            continue  # Skip scenes without oshash or video path
+            if config.excluded_paths and any(video_path.startswith(ep) for ep in config.excluded_paths):
+                continue
 
-        # Check if preview already exists
-        preview_file = os.path.join(config.preview_path, f"{oshash}.mp4")
+            preview_file = os.path.join(config.preview_path, f"{oshash}.mp4")
 
-        if not os.path.exists(preview_file):
-            # Translate path and verify file exists
-            translated_path = translate_path(video_path)
+            if not os.path.exists(preview_file):
+                translated_path = translate_path(video_path)
 
-            if os.path.exists(translated_path):
-                missing.append({
-                    'scene_id': scene_id,
-                    'video_path': translated_path,
-                    'oshash': oshash,
-                    'duration': duration,
-                    'scene_title': scene_title
-                })
+                if os.path.exists(translated_path):
+                    missing.append({
+                        'scene_id': scene_id,
+                        'video_path': translated_path,
+                        'oshash': oshash,
+                        'duration': duration,
+                        'scene_title': scene_title
+                    })
 
-                if limit and len(missing) >= limit:
-                    break
+                    if limit and len(missing) >= limit:
+                        return missing
+
+        if len(scenes) < _PAGE_SIZE:
+            break
+
+        page += 1
 
     return missing

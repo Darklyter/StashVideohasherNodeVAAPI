@@ -1,12 +1,9 @@
 # scene_processor.py
 
 import os
-import re
 import subprocess
 import json
-import string
 import base64
-import random
 import requests
 import shutil
 from datetime import datetime
@@ -17,9 +14,9 @@ from helpers.phash_generator import compute_phash
 
 from config import (
     windows, binary, ffmpeg, ffprobe,
-    generate_sprite, generate_preview, sprite_path, preview_path,
+    sprite_path, preview_path,
     preview_audio, preview_clips, preview_clip_length, preview_skip_seconds,
-    translations, dry_run, verbose,
+    translations,
     hashing_tag, hashing_error_tag, cover_error_tag
 )
 
@@ -35,9 +32,11 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
     vaapi_used = False
     success = True
     scene_id = scene['id']
+    if not scene.get('files'):
+        return {'success': False, 'elapsed_time': 0, 'scene_id': scene.get('id')}
     file_id = scene['files'][0]['id']
     filename = scene['files'][0]['path']
-    filename_pretty = re.search(r'.*[/\\](.*?)$', filename).group(1)
+    filename_pretty = os.path.basename(filename)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if index and total_batch:
@@ -54,7 +53,10 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
             filehash = fp['value']
 
     if not filehash or ":" in filehash or "\\" in filehash or "/" in filehash:
-        filehash = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
+        log_scene_failure(scene_id, filename_pretty, "oshash validation", f"Invalid or missing oshash: {filehash!r}")
+        tag_scene_error(scene_id, hashing_error_tag, f"Invalid or missing oshash: {filehash!r}")
+        elapsed = time.time() - start_time
+        return {'success': False, 'elapsed_time': elapsed, 'scene_id': scene_id}
 
     filename = os.path.normpath(filename)
     file_exists = os.path.exists(filename)
@@ -78,7 +80,7 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
             if config.phash_backend == "binary":
                 print(f"🟡 [DEBUG] CLI: {binary} -json '{filename}'")
             phash_start = time.time()
-        if dry_run:
+        if config.dry_run:
             print(f"[DRY RUN] Would compute phash for {filename}")
             performed_options.append("phash (dry run)")
             if config.debug:
@@ -87,7 +89,7 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
         else:
             try:
                 if config.phash_backend == "binary":
-                    proc = subprocess.run([binary, '-json', filename], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+                    proc = subprocess.run([binary, '-json', filename], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=120)
                     phash = json.loads(proc.stdout.decode("utf-8"))['phash']
                 else:
                     phash = compute_phash(filename, vaapi_device=vaapi_device)['phash']
@@ -104,7 +106,7 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
 
         try:
             cover_image = scene['paths'].get('screenshot')
-            if cover_image and "<svg" in requests.get(cover_image).content.decode('latin_1').lower():
+            if cover_image and "<svg" in requests.get(cover_image, timeout=10).content.decode('latin_1').lower():
                 temp_dir = os.path.abspath(os.path.join(".tmp", f"cover_temp_{filehash}"))
                 os.makedirs(temp_dir, exist_ok=True)
                 image_filename = os.path.join(temp_dir, f"{filehash}_cover.jpg")
@@ -117,7 +119,7 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
                     print(f"🟡 [DEBUG] Starting cover image extraction for {filename_pretty}")
                     print(f"🟡 [DEBUG] CLI: {' '.join(ffmpegcmd)}")
                     cover_start = time.time()
-                if dry_run:
+                if config.dry_run:
                     print(f"[DRY RUN] Would extract cover image using: {' '.join(ffmpegcmd)}")
                     performed_options.append("cover (dry run)")
                     if config.debug:
@@ -125,10 +127,10 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
                         print(f"🟡 [DEBUG] Finished cover image extraction for {filename_pretty} in {cover_elapsed:.2f} seconds")
                 else:
                     try:
-                        subprocess.run(ffmpegcmd, check=True)
+                        subprocess.run(ffmpegcmd, check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         if not os.path.exists(image_filename):
                             ffmpegcmd[ffmpegcmd.index('-ss') + 1] = '00:00:05'
-                            subprocess.run(ffmpegcmd, check=True)
+                            subprocess.run(ffmpegcmd, check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         if not os.path.exists(image_filename):
                             raise FileNotFoundError(f"Cover image not created: {image_filename}")
                         with open(image_filename, "rb") as img:
@@ -147,7 +149,7 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
             log_scene_failure(scene_id, filename_pretty, "cover image setup", e)
             tag_scene_error(scene_id, cover_error_tag, str(e))
 
-        if generate_sprite:
+        if config.generate_sprite:
             sprite_file = os.path.join(sprite_path, f"{filehash}_sprite.jpg")
             vtt_file = os.path.join(sprite_path, f"{filehash}_thumbs.vtt")
             encoder_note = "VAAPI" if vaapi_supported else "software"
@@ -156,7 +158,7 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
                     print(f"🟡 [DEBUG] Starting sprite generation for {filename_pretty}")
                     print(f"🟡 [DEBUG] VideoSpriteGenerator: 81 frames × {encoder_note} extraction → PIL assembly → {sprite_file}")
                     sprite_start = time.time()
-                if dry_run:
+                if config.dry_run:
                     print(f"[DRY RUN] Would generate sprite for {filename_pretty} → {sprite_file}")
                     performed_options.append("sprite (dry run)")
                     if config.debug:
@@ -164,11 +166,12 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
                         print(f"🟡 [DEBUG] Finished sprite generation for {filename_pretty} in {sprite_elapsed:.2f} seconds")
                 else:
                     try:
+                        if not config.debug:
+                            sprite_start = time.time()
                         generator = VideoSpriteGenerator(
                             filename, sprite_file, vtt_file, filehash, ffmpeg, ffprobe,
                             use_vaapi=vaapi_supported, vaapi_device=vaapi_device
                         )
-                        sprite_start = time.time()
                         generator.generate_sprite()
                         sprite_elapsed = time.time() - sprite_start
                         performed_options.append("sprite")
@@ -180,21 +183,13 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
                         success = False
                         # Don't return early - continue to release scene
 
-        if generate_preview:
+        if config.generate_preview:
             preview_file = os.path.join(preview_path, f"{filehash}.mp4")
-        # VAAPI notification handled by main script
-            if vaapi_supported and vaapi_device:
-                preview_cmd = f"{ffmpeg} -vaapi_device {vaapi_device} -ss 0 -i '{filename}' -vf 'format=nv12,hwupload,scale_vaapi=640:360' -c:v h264_vaapi -global_quality 18 -an -y '{preview_file}'"
-            elif config.nvenc:
-                preview_cmd = f"{ffmpeg} -i '{filename}' -vf 'scale=640:360' -c:v h264_nvenc -cq:v 18 -preset p4 -an -y '{preview_file}'"
-            else:
-                preview_cmd = f"{ffmpeg} -i '{filename}' -vf 'scale=640:360' -c:v libx264 -crf 18 -preset slow -an -y '{preview_file}'"
             if not os.path.exists(preview_file):
                 if config.debug:
                     print(f"🟡 [DEBUG] Starting preview generation for {filename_pretty}")
-                    print(f"🟡 [DEBUG] CLI: {preview_cmd}")
                     preview_start = time.time()
-                if dry_run:
+                if config.dry_run:
                     print(f"[DRY RUN] Would generate preview for {filename_pretty} → {preview_file}")
                     performed_options.append("preview (dry run)")
                     if config.debug:
@@ -244,7 +239,7 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
                             marker_seconds = marker['seconds']
                             marker_title = marker.get('title', f"Marker at {marker_seconds}s")
 
-                            if dry_run:
+                            if config.dry_run:
                                 print(f"[DRY RUN] Would generate marker media for {marker_title}")
                                 performed_options.append(f"marker {marker_id} (dry run)")
                             else:

@@ -607,7 +607,7 @@ vaapi_available()  ────►   process_scene()  ────►      Video
 ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
   -vaapi_device /dev/dri/renderD128 \
   -i input.mp4 -frames:v 1 \
-  -vf 'scale_vaapi=160:-2,hwdownload,format=nv12' \
+  -vf 'scale_vaapi=160:-2,hwdownload,format=bgr0' \
   -c:v png frame.jpg
 ```
 

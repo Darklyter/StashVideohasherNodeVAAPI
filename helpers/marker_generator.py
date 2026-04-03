@@ -55,7 +55,7 @@ class MarkerGenerator:
         self.thumbnail_duration = thumbnail_duration
         self.thumbnail_fps = thumbnail_fps
         self.use_vaapi = use_vaapi
-        self.vaapi_device = vaapi_device if vaapi_device else '/dev/dri/renderD128'
+        self.vaapi_device = vaapi_device
 
         # Temp directory
         self.temp_dir = os.path.abspath(os.path.join(".tmp", f"marker_{oshash}_{self.marker_int}"))
@@ -72,7 +72,7 @@ class MarkerGenerator:
 
         os.makedirs(os.path.dirname(self.mp4_path), exist_ok=True)
 
-        use_vaapi = self.use_vaapi if self.use_vaapi is not None else False
+        use_vaapi = bool(self.use_vaapi) and bool(self.vaapi_device)
 
         if use_vaapi:
             # VAAPI hardware-accelerated encoding
@@ -121,11 +121,12 @@ class MarkerGenerator:
             ]
 
         try:
-            subprocess.run(command, check=True)
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
             return os.path.exists(self.mp4_path)
         except subprocess.CalledProcessError as e:
-            if verbose:
-                print(f"⚠️ Failed to generate MP4 preview: {e}")
+            stderr = e.stderr.decode('utf-8', errors='replace').strip().splitlines()
+            detail = stderr[-1] if stderr else str(e)
+            print(f"⚠️ Failed to generate MP4 preview: {detail}")
             return False
 
     def generate_thumbnail(self):
@@ -157,11 +158,12 @@ class MarkerGenerator:
         ]
 
         try:
-            subprocess.run(command, check=True)
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
             return os.path.exists(self.webp_path)
         except subprocess.CalledProcessError as e:
-            if verbose:
-                print(f"⚠️ Failed to generate WebP thumbnail: {e}")
+            stderr = e.stderr.decode('utf-8', errors='replace').strip().splitlines()
+            detail = stderr[-1] if stderr else str(e)
+            print(f"⚠️ Failed to generate WebP thumbnail: {detail}")
             return False
 
     def generate_screenshot(self):
@@ -187,11 +189,12 @@ class MarkerGenerator:
         ]
 
         try:
-            subprocess.run(command, check=True)
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
             return os.path.exists(self.jpg_path)
         except subprocess.CalledProcessError as e:
-            if verbose:
-                print(f"⚠️ Failed to generate JPG screenshot: {e}")
+            stderr = e.stderr.decode('utf-8', errors='replace').strip().splitlines()
+            detail = stderr[-1] if stderr else str(e)
+            print(f"⚠️ Failed to generate JPG screenshot: {detail}")
             return False
 
     def clean_temp_dirs(self):

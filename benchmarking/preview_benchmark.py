@@ -32,12 +32,21 @@ def get_video_duration(input_file):
         '-show_entries', 'format=duration',
         '-of', 'default=noprint_wrappers=1:nokey=1',
         input_file
-    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return float(result.stdout)
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, TypeError):
+        stderr = result.stderr.decode('utf-8', errors='replace').strip()
+        raise RuntimeError(f"Could not determine duration for {input_file}: {stderr}")
 
 
 def get_start_times(duration, num_clips, clip_length, skip_seconds):
-    interval = (duration - skip_seconds - clip_length) / (num_clips + 1)
+    usable = duration - skip_seconds - clip_length
+    if usable <= 0:
+        raise RuntimeError(
+            f"Video too short ({duration:.1f}s) for skip_seconds={skip_seconds} + clip_length={clip_length}"
+        )
+    interval = usable / (num_clips + 1)
     return [skip_seconds + interval * i for i in range(1, num_clips + 1)]
 
 
@@ -149,7 +158,7 @@ def run_benchmark(input_file, output_file, encoder, vaapi_device, num_clips, cli
             return extract_clip(config.ffmpeg, input_file, clip_file, start, clip_length,
                                 encoder, vaapi_device, verbose)
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
             clip_files = list(executor.map(_extract, enumerate(start_times)))
 
         t_clips_elapsed = time.time() - t_clips_start

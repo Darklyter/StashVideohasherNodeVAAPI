@@ -61,7 +61,7 @@ def discover_scenes():
         before = len(batch_scenes)
         batch_scenes = [
             s for s in batch_scenes
-            if not any(ep in s['files'][0]['path'] for ep in config.excluded_paths)
+            if s.get('files') and not any(s['files'][0]['path'].startswith(ep) for ep in config.excluded_paths)
         ]
         excluded = before - len(batch_scenes)
         if excluded:

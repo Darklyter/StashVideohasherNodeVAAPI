@@ -33,8 +33,12 @@ def get_video_duration(input_file):
         '-show_entries', 'format=duration',
         '-of', 'default=noprint_wrappers=1:nokey=1',
         input_file
-    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return float(result.stdout)
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, TypeError):
+        stderr = result.stderr.decode('utf-8', errors='replace').strip()
+        raise RuntimeError(f"Could not determine duration for {input_file}: {stderr}")
 
 
 def extract_frame(input_file, timestamp, output_file, use_vaapi, vaapi_device, max_width, max_height, verbose):
@@ -46,7 +50,7 @@ def extract_frame(input_file, timestamp, output_file, use_vaapi, vaapi_device, m
             '-v', 'error', '-y',
             '-ss', str(timestamp), '-i', input_file,
             '-frames:v', '1',
-            '-vf', f'scale_vaapi={max_width}:-2,hwdownload,format=nv12',
+            '-vf', f'scale_vaapi={max_width}:-2,hwdownload,format=bgr0',
             '-c:v', 'png', output_file,
             '-loglevel', 'quiet'
         ]
@@ -102,7 +106,7 @@ def run_benchmark(input_file, output_file, use_vaapi, vaapi_device,
             return extract_frame(input_file, ts, frame_file, use_vaapi, vaapi_device,
                                  max_width, max_height, verbose)
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
             frame_files = list(executor.map(_extract, enumerate(timestamps)))
 
         t_frames_elapsed = time.time() - t_frames_start

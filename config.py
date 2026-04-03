@@ -19,7 +19,7 @@ stash_api_key = None             # Set your API key here (Stash → Settings →
 # ─────────────────────────────────────────────
 # PHash Backend
 # ─────────────────────────────────────────────
-phash_backend  = "internal"                   # "internal" (pure-Python, no binary needed)
+phash_backend  = "binary"                   # "internal" (pure-Python, no binary needed)
                                               # "binary"   (peolic/videohashes executable)
 binary_windows = r".\bin\videohashes-windows.exe"
 binary_linux   = r"./bin/videohashes-linux"
@@ -74,8 +74,12 @@ translations = (
 # ─────────────────────────────────────────────
 # Processing Settings
 # ─────────────────────────────────────────────
+error_log_path     = "error_log.txt"  # Path for the error log file
+error_log_max_mb   = 10               # Rotate error log when it exceeds this size in MB (0 = no rotation)
+
 per_page    = 25     # --batch-size:   Number of scenes to process per run
 max_workers = 4      # --max-workers:  Number of threads for parallel processing
+batch_sleep = 5      # --batch-sleep:  Seconds to wait between batches (0 = no delay)
 dry_run     = False  # --dry-run:      Simulate processing without writing changes
 once        = False  # --once:         Run one batch then exit
 verbose     = False  # --verbose:      Display additional info including progress bars
@@ -85,9 +89,10 @@ filemask    = None   # --filemask:     Filter scenes by filename pattern (e.g. '
 # ─────────────────────────────────────────────
 # Hardware Acceleration
 # ─────────────────────────────────────────────
-vaapi       = True     # Enable VAAPI hardware acceleration if detected (Intel/AMD GPUs)
-nvenc       = False      # Enable NVIDIA NVENC hardware encoder (NVIDIA GPUs)
-hw_priority = "vaapi"   # Which encoder takes precedence when both are available: "vaapi" or "nvenc"
+vaapi          = True    # Enable VAAPI hardware acceleration if detected (Intel/AMD GPUs)
+nvenc          = False   # Enable NVIDIA NVENC hardware encoder (NVIDIA GPUs)
+hw_priority    = "vaapi" # Which encoder takes precedence when both are available: "vaapi" or "nvenc"
+vaapi_override = None    # Set by --vaapi / --novaapi CLI flags at runtime (True/False/None)
 
 # ─────────────────────────────────────────────
 # Sprite Generation
@@ -107,7 +112,7 @@ preview_skip_seconds  = 15     # Skip this many seconds from the start before sa
 # Marker Generation
 # ─────────────────────────────────────────────
 generate_markers      = True  # --generate-markers: Enable marker media generation
-marker_batch_size     = 50     # Batch size for standalone marker mode
+marker_batch_size     = 50     # Number of scenes per batch in standalone marker mode (all markers per scene are always included)
 
 # Media type toggles (all enabled by default)
 marker_preview_enabled    = True   # Generate MP4 previews

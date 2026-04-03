@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-04-03
+
+### Added
+- **Pure-Python phash backend** - Eliminates the hard dependency on Peolic's `videohashes` binary
+  - Implements the goimagehash `PerceptionHash` algorithm used by Stash in pure Python (numpy/scipy)
+  - Selectable via `config.phash_backend`: `"internal"` or `"binary"` (default)
+  - Accuracy: ~75% of hashes are bit-for-bit identical; remainder differ by Hamming distance 2–4, well within Stash's identical-match threshold. Use `"binary"` if exact hash reproduction is required
+  - Benefits from VAAPI hardware decode during frame extraction when VAAPI is available
+  - Health check updated: validates numpy/scipy for `"internal"` backend; validates binary path/executable bit for `"binary"` backend
+  - `requirements.txt` updated with `numpy` and `scipy` dependencies
+- **`batch_sleep` configuration** - Configurable inter-batch delay (default: 5 seconds)
+  - `config.batch_sleep = 5` — set to 0 to disable delay entirely
+  - `--batch-sleep N` CLI flag overrides config at runtime
+- **`--version` flag** - Print version and exit (`python phash_videohasher_main.py --version`)
+- **Paginated discovery** - Standalone discovery modules (`sprite_discovery`, `preview_discovery`, `marker_discovery`) now fetch scenes and markers in pages of 100 instead of loading the entire database into memory at once; early-exits as soon as the requested batch limit is reached
+- **`--clear-hashing-tags` flag** - Recover from hard kills that leave scenes stuck with the in-process hashing tag; clears the tag from all affected scenes and exits
+- **`excluded_paths` filtering in all discovery modules** - `sprite_discovery`, `preview_discovery`, and `marker_discovery` now respect `config.excluded_paths`; previously only `scene_discovery` filtered by path
+- **Configurable error log path and rotation** - `config.error_log_path` and `config.error_log_max_mb` (default: `"error_log.txt"`, 10 MB); log is rotated to `.1` when size limit is reached
+- **Test suite** - 53 tests across 4 test files covering the phash algorithm, preview generator, excluded-path filtering, oshash validation, and batch statistics
+
+### Fixed
+- **VAAPI device `None` crash** - All three generators now guard `use_vaapi` with `bool(self.use_vaapi) and bool(self.vaapi_device)`; VAAPI falls back to software if device is `None` rather than passing `None` as a literal string to ffmpeg
+- **PIL file handle exhaustion in sprite assembly** - `create_sprite()` previously opened all 81 frame images simultaneously; images are now opened one at a time inside `with` blocks, preventing "Too many open files" errors
+- **Silent ffmpeg failures** - All `subprocess.run(check=True)` calls in generators now capture `stderr`; the last line of ffmpeg output is included in error messages instead of being discarded
+- **Bare `except:` in `VideoSpriteGenerator.get_video_duration()`** - Replaced with `except (ValueError, TypeError)` that raises a `RuntimeError` with the actual ffprobe error message; also fixed `stderr=subprocess.STDOUT` merging ffprobe errors into the duration output
+- **Stash `update_scenes` ids not wrapped in lists** - All five `update_scenes` calls now pass `[scene_id]` instead of a bare string (`tag_scene_error`, `claim_scene`, `release_scene`, `clear_error_tags`)
+- **`excluded_paths` substring matching** - Changed from `ep in path` to `path.startswith(ep)` in both `scene_discovery.py` and `stash_utils.py`; prevents partial-match false positives (e.g. `/mnt/archive/` no longer matches `/mnt/archive2/`)
+- **Invalid oshash replaced with random string** - Instead of silently substituting a random 12-character hash, scenes with missing or malformed oshash are now tagged with an error and skipped
+- **`filename_pretty` regex crash** - Replaced fragile `re.search(r'.*[/\\](.*?)$', ...).group(1)` with `os.path.basename()`
+- **Requests call with no timeout** - Cover image screenshot check now uses `timeout=10`
+- **Duplicate `sprite_start` timer reset** - The second `sprite_start = time.time()` (after generator creation) now only runs outside debug mode, preserving the debug timing set before generator setup
+- **Hardcoded `/dev/dri/renderD128` fallback removed** from all three generator constructors
+- **`ThreadPoolExecutor` max_workers hardcoded to 4** in sprite and preview generators; now uses `config.max_workers`
+- **Case-sensitive `.jpg` extension check** in `VideoSpriteGenerator.create_sprite()` changed to `.lower().endswith('.jpg')`
+- **Dead `preview_cmd` variable** removed from `scene_processor.py` — shell string was constructed but never executed; debug output it produced didn't match the actual ffmpeg command run by `PreviewVideoGenerator`
+- **Dead `detect_vaapi()` function** removed from `phash_generator.py` along with its unused import
+- **Dead `get_scenes_to_process()` function** removed from `stash_utils.py` — was replaced in an earlier refactor but never deleted
+- **`--standalone-markers` incorrectly enabled integrated marker generation** - `apply_cli_args` was setting `config.generate_markers = args.generate_markers or args.standalone_markers`; standalone marker mode no longer enables the integrated marker step
+- **`get_total_scene_count()` loaded full database** - When no `excluded_paths` are set, now uses a count-only query (`per_page=1, get_count=True`) instead of fetching all scene IDs; significantly faster on large databases
+- **Benchmark scripts used hardcoded `max_workers=4`** - `preview_benchmark.py` and `sprite_benchmark.py` now use `config.max_workers`
+
+### Changed
+- Ctrl+C and SIGTERM during inter-batch sleep now exit immediately — replaced `time.sleep()` with `threading.Event.wait()` so the shutdown signal wakes the sleep instantly rather than waiting for the full delay to expire
+
 ## [1.2.0] - 2026-04-01
 
 ### Added
@@ -148,6 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **v1.3.0** - Pure-Python phash backend, paginated discovery, `--version`/`--clear-hashing-tags` flags, excluded_paths in all discovery modules, configurable error log, test suite (53 tests), bug fixes: VAAPI None crash, PIL file leak, silent ffmpeg errors, oshash validation, standalone-markers flag, count query optimization
 - **v1.2.0** - NVENC support, hardware encoder priority, excluded paths, audio fix, health check encode tests
 - **v1.1.0** - Marker generation, standalone modes, API key support, and performance fixes
 - **v0.1.0** - Initial release with core functionality

@@ -35,7 +35,6 @@ from PIL import Image
 from scipy.fft import dct
 
 import config
-from helpers.vaapi_utils import vaapi_available
 
 # ─────────────────────────────────────────────
 # Constants (must match goimagehash PerceptionHash)
@@ -118,12 +117,13 @@ def _get_duration(video_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=True,
+        timeout=30,
     )
     return float(result.stdout.strip())
 
 
 def _extract_frame_software(video_path, timestamp):
-    """Extract one frame at `timestamp` via software decode. Returns PIL Image or None."""
+    """Extract one frame at `timestamp` via software decode. Returns PIL Image."""
     fd, tmp = tempfile.mkstemp(suffix='.bmp')
     os.close(fd)
     try:
@@ -138,11 +138,13 @@ def _extract_frame_software(video_path, timestamp):
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=60,
         )
         img = Image.open(tmp)
         return img.copy()
-    except Exception:
-        return None
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode('utf-8', errors='replace').strip()
+        raise RuntimeError(f"ffmpeg frame extraction failed at {timestamp:.1f}s: {err}") from e
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -170,6 +172,7 @@ def _extract_frame_vaapi(video_path, timestamp, vaapi_device):
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=60,
         )
         img = Image.open(tmp)
         return img.copy()
@@ -266,21 +269,10 @@ def compute_phash(video_path, vaapi_device=None):
         Exception on ffprobe/ffmpeg failure or unreadable file.
     """
     duration = _get_duration(video_path)
+    if duration <= 0:
+        raise RuntimeError(f"Invalid video duration ({duration}s) for {video_path}")
     sprite   = _build_sprite(video_path, duration, vaapi_device=vaapi_device)
     phash    = _phash_from_sprite(sprite)
     return {"phash": phash}
 
 
-def detect_vaapi():
-    """
-    Convenience wrapper: return vaapi_device string if VAAPI is enabled in
-    config and available on this machine, else None.
-
-    Usage in callers:
-        vaapi_device = detect_vaapi()
-        result = compute_phash(path, vaapi_device=vaapi_device)
-    """
-    if not config.vaapi:
-        return None
-    ok, device = vaapi_available()
-    return device if ok else None

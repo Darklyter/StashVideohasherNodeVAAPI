@@ -5,7 +5,7 @@ import os
 import shutil
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
-from config import verbose, nvenc
+from config import verbose, nvenc, max_workers
 import time
 from datetime import datetime
 
@@ -25,16 +25,20 @@ class PreviewVideoGenerator:
         self.scene_id = scene_id
         self.scene_name = scene_name
         self.use_vaapi = use_vaapi
-        self.vaapi_device = vaapi_device if vaapi_device else '/dev/dri/renderD128'
+        self.vaapi_device = vaapi_device
 
     def get_video_duration(self):
         result = subprocess.run(
             [self.ffprobe, '-v', 'error', '-show_entries', 'format=duration',
              '-of', 'default=noprint_wrappers=1:nokey=1', self.filename],
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT
+            stderr=subprocess.PIPE
         )
-        return float(result.stdout)
+        try:
+            return float(result.stdout.strip())
+        except (ValueError, TypeError):
+            err = result.stderr.decode('utf-8', errors='replace').strip()
+            raise RuntimeError(f"Could not determine duration for {self.filename}: {err}")
 
     def clean_previous_clips(self):
         if os.path.exists(self.temp_dir):
@@ -44,7 +48,7 @@ class PreviewVideoGenerator:
         os.makedirs(self.temp_dir, exist_ok=True)
         video_duration = self.get_video_duration()
         start_times = self.get_start_times(video_duration)
-        use_vaapi = self.use_vaapi if self.use_vaapi is not None else False
+        use_vaapi = bool(self.use_vaapi) and bool(self.vaapi_device)
 
         def extract_clip(i, start_time):
             clip_file = os.path.join(self.temp_dir, f"clip_{i:03d}.mp4")
@@ -80,14 +84,16 @@ class PreviewVideoGenerator:
                     '-preset', 'slow',
                 ] + audio_args + ['-y', '-loglevel', 'quiet', clip_file]
             try:
-                subprocess.run(command, check=True)
+                subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to generate clip {i} for scene {self.scene_id} — {self.scene_name}: {e}")
+                stderr = e.stderr.decode('utf-8', errors='replace').strip().splitlines()
+                detail = stderr[-1] if stderr else str(e)
+                print(f"❌ Failed to generate clip {i} for scene {self.scene_id} — {self.scene_name}: {detail}")
                 return None
             return clip_file
 
         clips = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(extract_clip, i, start_time) for i, start_time in enumerate(start_times)]
             iterator = tqdm(futures, desc="🎞️ Generating Preview Clips", unit="clip") if verbose else futures
             for future in iterator:
@@ -98,7 +104,12 @@ class PreviewVideoGenerator:
         return clips
 
     def get_start_times(self, video_duration):
-        interval = (video_duration - self.skip_seconds - self.clip_length) / (self.num_clips + 1)
+        usable = video_duration - self.skip_seconds - self.clip_length
+        if usable <= 0:
+            raise RuntimeError(
+                f"Video too short ({video_duration:.1f}s) for skip_seconds={self.skip_seconds} + clip_length={self.clip_length}"
+            )
+        interval = usable / (self.num_clips + 1)
         return [self.skip_seconds + interval * i for i in range(1, self.num_clips + 1)]
 
     def concatenate_clips(self, clips):
@@ -112,7 +123,7 @@ class PreviewVideoGenerator:
                 safe_path = os.path.normpath(clip).replace("\\", "/")
                 f.write(f"file '{safe_path}'\n")
 
-        use_vaapi = self.use_vaapi if self.use_vaapi is not None else False
+        use_vaapi = bool(self.use_vaapi) and bool(self.vaapi_device)
         audio_args = ['-c:a', 'aac', '-b:a', '192k'] if self.include_audio else ['-an']
 
         command = [self.ffmpeg]
@@ -153,10 +164,12 @@ class PreviewVideoGenerator:
         command.extend(['-y', '-loglevel', 'quiet', self.output_path])
 
         try:
-            subprocess.run(command, check=True)
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to concatenate preview for scene {self.scene_id} — {self.scene_name}: {e}")
-            raise RuntimeError(f"FFmpeg failed to concatenate clips: {e}")
+            stderr = e.stderr.decode('utf-8', errors='replace').strip().splitlines()
+            detail = stderr[-1] if stderr else str(e)
+            print(f"❌ Failed to concatenate preview for scene {self.scene_id} — {self.scene_name}: {detail}")
+            raise RuntimeError(f"FFmpeg failed to concatenate clips: {detail}")
 
     def generate_preview(self):
         self.clean_previous_clips()

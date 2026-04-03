@@ -1,8 +1,9 @@
 # stash_utils.py
 
 from stashapi.stashapp import StashInterface
-from config import hashing_tag, hashing_error_tag, cover_error_tag, dry_run, stash_scheme, stash_host, stash_port, stash_api_key, excluded_paths
+from config import hashing_tag, hashing_error_tag, cover_error_tag, dry_run, stash_scheme, stash_host, stash_port, stash_api_key, excluded_paths, error_log_path, error_log_max_mb
 from datetime import datetime
+import os
 import threading
 
 # Initialize Stash connection with optional API key
@@ -20,6 +21,19 @@ stash = StashInterface(stash_config)
 
 # Thread-safe error logging
 error_log_lock = threading.Lock()
+
+def _rotate_log_if_needed():
+    """Rotate error_log_path if it exceeds error_log_max_mb. Called inside error_log_lock."""
+    if error_log_max_mb <= 0:
+        return
+    try:
+        if os.path.exists(error_log_path) and os.path.getsize(error_log_path) > error_log_max_mb * 1024 * 1024:
+            rotated = error_log_path + ".1"
+            if os.path.exists(rotated):
+                os.remove(rotated)
+            os.rename(error_log_path, rotated)
+    except Exception:
+        pass  # Rotation failure is non-fatal
 
 def log_scene_failure(scene_id, filename_pretty, step, error):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -45,43 +59,60 @@ def reset_terminal():
             pass  # If stty fails, at least we reset colors/cursor
 
 def get_total_scene_count():
-    fragment = "id files{path}" if excluded_paths else "id"
-    scenes = stash.find_scenes(
-        f={
-            "phash": {"value": "", "modifier": "IS_NULL"},
-            "tags": {"value": [hashing_tag, hashing_error_tag, cover_error_tag], "modifier": "EXCLUDES"}
-        },
-        filter={"sort": "created_at", "direction": "DESC", "per_page": -1},
-        fragment=fragment
-    )
     if excluded_paths:
-        scenes = [s for s in scenes if not any(ep in s['files'][0]['path'] for ep in excluded_paths)]
-    return len(scenes)
+        # Need paths to filter — fetch all IDs+paths but only one field each
+        scenes = stash.find_scenes(
+            f={
+                "phash": {"value": "", "modifier": "IS_NULL"},
+                "tags": {"value": [hashing_tag, hashing_error_tag, cover_error_tag], "modifier": "EXCLUDES"}
+            },
+            filter={"per_page": -1},
+            fragment="id files{path}"
+        )
+        return sum(
+            1 for s in scenes
+            if s.get('files') and not any(s['files'][0]['path'].startswith(ep) for ep in excluded_paths)
+        )
+    else:
+        count, _ = stash.find_scenes(
+            f={
+                "phash": {"value": "", "modifier": "IS_NULL"},
+                "tags": {"value": [hashing_tag, hashing_error_tag, cover_error_tag], "modifier": "EXCLUDES"}
+            },
+            filter={"per_page": 1},
+            fragment="id",
+            get_count=True
+        )
+        return count
 
 def tag_scene_error(scene_id, error_tag, error_msg=None):
     if dry_run:
         print(f"[DRY RUN] Would tag scene {scene_id} with error tag {error_tag}")
         return
-    stash.update_scenes({"ids": scene_id, "tag_ids": {"ids": error_tag, "mode": "ADD"}})
-    stash.update_scenes({"ids": scene_id, "tag_ids": {"ids": hashing_tag, "mode": "REMOVE"}})
+    stash.update_scenes({"ids": [scene_id], "tag_ids": {"ids": error_tag, "mode": "ADD"}})
+    stash.update_scenes({"ids": [scene_id], "tag_ids": {"ids": hashing_tag, "mode": "REMOVE"}})
     if error_msg:
         # Thread-safe error logging
-        with error_log_lock:
-            with open("error_log.txt", "a", encoding="utf-8") as log:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                log.write(f"[{timestamp}] Scene {scene_id}: {error_msg}\n")
+        try:
+            with error_log_lock:
+                _rotate_log_if_needed()
+                with open(error_log_path, "a", encoding="utf-8") as log:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    log.write(f"[{timestamp}] Scene {scene_id}: {error_msg}\n")
+        except Exception as log_err:
+            print(f"⚠️ Failed to write {error_log_path}: {log_err}")
 
 def claim_scene(scene_id):
     if dry_run:
         print(f"[DRY RUN] Would claim scene {scene_id}")
         return
-    stash.update_scenes({"ids": scene_id, "tag_ids": {"ids": hashing_tag, "mode": "ADD"}})
+    stash.update_scenes({"ids": [scene_id], "tag_ids": {"ids": hashing_tag, "mode": "ADD"}})
 
 def release_scene(scene_id):
     if dry_run:
         print(f"[DRY RUN] Would release scene {scene_id}")
         return
-    stash.update_scenes({"ids": scene_id, "tag_ids": {"ids": hashing_tag, "mode": "REMOVE"}})
+    stash.update_scenes({"ids": [scene_id], "tag_ids": {"ids": hashing_tag, "mode": "REMOVE"}})
 
 def update_phash(file_id, phash):
     if dry_run:
@@ -94,14 +125,6 @@ def update_cover(scene_id, cover_data):
         print(f"[DRY RUN] Would update cover image for scene {scene_id}")
         return True
     return stash.update_scene({"id": scene_id, "cover_image": cover_data})
-
-def get_scenes_to_process():
-    return stash.find_scenes(
-        f={"phash": {"value": "", "modifier": "IS_NULL"},
-           "tags": {"value": [hashing_tag, hashing_error_tag, cover_error_tag], "modifier": "EXCLUDES"}},
-        filter={"sort": "created_at", "direction": "DESC", "per_page": -1},
-        fragment="id files{id path fingerprints{value type}} paths{screenshot}"
-    )
 
 def get_error_scenes():
     """Get scenes with error tags for retry"""
@@ -117,8 +140,24 @@ def clear_error_tags(scene_ids):
         print(f"[DRY RUN] Would clear error tags from {len(scene_ids)} scenes")
         return
     for scene_id in scene_ids:
-        stash.update_scenes({"ids": scene_id, "tag_ids": {"ids": hashing_error_tag, "mode": "REMOVE"}})
-        stash.update_scenes({"ids": scene_id, "tag_ids": {"ids": cover_error_tag, "mode": "REMOVE"}})
+        stash.update_scenes({"ids": [scene_id], "tag_ids": {"ids": hashing_error_tag, "mode": "REMOVE"}})
+        stash.update_scenes({"ids": [scene_id], "tag_ids": {"ids": cover_error_tag, "mode": "REMOVE"}})
+
+def get_hashing_scenes():
+    """Get scenes currently tagged with the in-process hashing tag"""
+    return stash.find_scenes(
+        f={"tags": {"value": [hashing_tag], "modifier": "INCLUDES"}},
+        filter={"per_page": -1},
+        fragment="id"
+    )
+
+def clear_hashing_tags(scene_ids):
+    """Clear the in-process hashing tag from scenes (recover from crashed runs)"""
+    if dry_run:
+        print(f"[DRY RUN] Would clear hashing tag from {len(scene_ids)} scenes")
+        return
+    for scene_id in scene_ids:
+        stash.update_scenes({"ids": [scene_id], "tag_ids": {"ids": hashing_tag, "mode": "REMOVE"}})
 
 def get_scene_markers_with_files(scene_id):
     """
@@ -155,7 +194,11 @@ def log_marker_failure(marker_id, marker_title, step, error):
         print(msg.encode('utf-8', errors='replace').decode('ascii', errors='replace'))
 
     # Thread-safe error logging
-    with error_log_lock:
-        with open("error_log.txt", "a", encoding="utf-8") as log:
-            log.write(f"[{timestamp}] Marker {marker_id} — {marker_title}: {step} failed: {error}\n")
+    try:
+        with error_log_lock:
+            _rotate_log_if_needed()
+            with open(error_log_path, "a", encoding="utf-8") as log:
+                log.write(f"[{timestamp}] Marker {marker_id} — {marker_title}: {step} failed: {error}\n")
+    except Exception as log_err:
+        print(f"⚠️ Failed to write {error_log_path}: {log_err}")
 
