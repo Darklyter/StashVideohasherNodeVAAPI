@@ -74,6 +74,9 @@ translations = (
 # ─────────────────────────────────────────────
 per_page    = 25     # --batch-size:   Number of scenes to process per run
 max_workers = 4      # --max-workers:  Number of threads for parallel processing
+max_ffmpeg_procs = 0 # Cap on ffmpeg processes running at once across all threads (0 = no cap).
+                     # Each scene thread starts up to max_workers ffmpeg jobs of its own, so the
+                     # uncapped peak is max_workers x max_workers.
 batch_sleep = 5      # --batch-sleep:  Seconds to wait between batches (0 = no delay)
 dry_run     = False  # --dry-run:      Simulate processing without writing changes
 once        = False  # --once:         Run one batch then exit

@@ -1,51 +1,99 @@
 # scene_processor.py
 
 import os
-import subprocess
 import json
 import base64
-import requests
 import shutil
+import time
 from datetime import datetime
 
+import requests
+
+import config
+from helpers import ffmpeg_utils
+from helpers.paths import translate_path
 from helpers.video_sprite_generator import VideoSpriteGenerator
 from helpers.preview_video_generator import PreviewVideoGenerator
 from helpers.phash_generator import compute_phash
-
-from config import (
-    windows, binary, ffmpeg, ffprobe,
-    sprite_path, preview_path,
-    preview_audio, preview_clips, preview_clip_length, preview_skip_seconds,
-    translations,
-    hashing_tag, hashing_error_tag, cover_error_tag
-)
-
 from helpers.stash_utils import (
-    claim_scene, release_scene, tag_scene_error,
+    claim_scene, release_scene, tag_scene_error, is_scene_claimed,
     update_phash, update_cover, log_scene_failure
 )
 
+
+def _now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _cover_is_placeholder(cover_url):
+    """True when Stash is serving its default SVG placeholder instead of a real cover."""
+    headers = {"ApiKey": config.stash_api_key} if config.stash_api_key else {}
+    response = requests.get(cover_url, headers=headers, timeout=10)
+    return "<svg" in response.content.decode('latin_1').lower()
+
+
+def _generate_cover(scene_id, filename, filename_pretty, filehash, performed_options):
+    temp_dir = ffmpeg_utils.tmp_path(f"cover_temp_{filehash}")
+    os.makedirs(temp_dir, exist_ok=True)
+    image_filename = os.path.join(temp_dir, f"{filehash}_cover.jpg")
+
+    def command(seek):
+        # -ss before -i: seek in the input instead of decoding everything up to that point
+        return [
+            config.ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+            '-ss', seek, '-i', filename, '-vframes', '1',
+            image_filename
+        ]
+
+    if config.debug:
+        print(f"🟡 [DEBUG] Starting cover image extraction for {filename_pretty}")
+        print(f"🟡 [DEBUG] CLI: {' '.join(command('00:00:30'))}")
+    cover_start = time.time()
+    if config.dry_run:
+        print(f"[DRY RUN] Would extract cover image using: {' '.join(command('00:00:30'))}")
+        performed_options.append("cover (dry run)")
+        return
+    try:
+        for seek in ('00:00:30', '00:00:05', '00:00:00'):
+            ffmpeg_utils.run(command(seek), timeout=120, check=False)
+            if os.path.exists(image_filename) and os.path.getsize(image_filename) > 0:
+                break
+        else:
+            raise FileNotFoundError(f"Cover image not created: {image_filename}")
+        with open(image_filename, "rb") as img:
+            encoded = base64.b64encode(img.read()).decode()
+        update_cover(scene_id, "data:image/jpeg;base64," + encoded)
+        performed_options.append("cover")
+        if config.debug:
+            print(f"🟡 [DEBUG] Finished cover image extraction for {filename_pretty} in {time.time() - cover_start:.2f} seconds")
+    except Exception as e:
+        log_scene_failure(scene_id, filename_pretty, "cover image generation", ffmpeg_utils.error_detail(e))
+        tag_scene_error(scene_id, config.cover_error_tag, str(e))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, vaapi_device=None):
-    import time
-    import config
     start_time = time.time()
-    vaapi_used = False
-    success = True
     scene_id = scene['id']
+
+    def result(success, **extra):
+        return {'success': success, 'elapsed_time': time.time() - start_time, 'scene_id': scene_id, **extra}
+
+    if ffmpeg_utils.shutdown_event.is_set():
+        return result(False, interrupted=True)
     if not scene.get('files'):
-        return {'success': False, 'elapsed_time': 0, 'scene_id': scene.get('id')}
+        return result(False)
+
+    success = True
     file_id = scene['files'][0]['id']
-    filename = scene['files'][0]['path']
-    filename_pretty = os.path.basename(filename)
+    stash_path = scene['files'][0]['path']
+    filename_pretty = os.path.basename(stash_path)
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if index and total_batch:
-        print(f"[{timestamp}] 📦 Scene #{index} of {total_batch}: ID {scene_id} — {filename_pretty}")
+        print(f"[{_now()}] 📦 Scene #{index} of {total_batch}: ID {scene_id} — {filename_pretty}")
     else:
-        print(f"[{timestamp}] 📦 Processing scene: ID {scene_id} — {filename_pretty}")
-
-    for t in translations:
-        filename = filename.replace(t['orig'], t['local'], 1)
+        print(f"[{_now()}] 📦 Processing scene: ID {scene_id} — {filename_pretty}")
 
     filehash = ""
     for fp in scene['files'][0].get('fingerprints', []):
@@ -54,235 +102,181 @@ def process_scene(scene, index=None, total_batch=None, vaapi_supported=False, va
 
     if not filehash or ":" in filehash or "\\" in filehash or "/" in filehash:
         log_scene_failure(scene_id, filename_pretty, "oshash validation", f"Invalid or missing oshash: {filehash!r}")
-        tag_scene_error(scene_id, hashing_error_tag, f"Invalid or missing oshash: {filehash!r}")
-        elapsed = time.time() - start_time
-        return {'success': False, 'elapsed_time': elapsed, 'scene_id': scene_id}
+        tag_scene_error(scene_id, config.hashing_error_tag, f"Invalid or missing oshash: {filehash!r}")
+        return result(False)
 
-    filename = os.path.normpath(filename)
-    file_exists = os.path.exists(filename)
+    filename = os.path.normpath(translate_path(stash_path))
 
     if config.verbose:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🔍 Translated path: {filename}")
+        print(f"[{_now()}] 🔍 Translated path: {filename}")
 
-    if not file_exists:
+    if not os.path.exists(filename):
         log_scene_failure(scene_id, filename_pretty, "file check", "File not found after translation")
-        tag_scene_error(scene_id, hashing_error_tag, "File not found after translation")
-        elapsed = time.time() - start_time
-        return {'success': False, 'elapsed_time': elapsed, 'scene_id': scene_id}
+        tag_scene_error(scene_id, config.hashing_error_tag, "File not found after translation")
+        return result(False)
+
+    # Another node may have picked the same random page — skip scenes it already claimed
+    try:
+        if is_scene_claimed(scene_id):
+            print(f"[{_now()}] ⏭️ Scene {scene_id} is already being processed by another node. Skipping.")
+            return result(False, skipped=True)
+    except Exception:
+        pass  # The check is an optimisation; carry on if it fails
 
     claim_scene(scene_id)
 
     try:
         performed_options = []
 
+        # ── PHash ──────────────────────────────────────────
+        binary_backend = config.phash_backend == "binary"
         if config.debug:
             print(f"🟡 [DEBUG] Starting phash generation for {filename_pretty}")
-            if config.phash_backend == "binary":
-                print(f"🟡 [DEBUG] CLI: {binary} -json '{filename}'")
-            phash_start = time.time()
+            if binary_backend:
+                print(f"🟡 [DEBUG] CLI: {config.binary} -json '{filename}'")
+        phash_start = time.time()
         if config.dry_run:
             print(f"[DRY RUN] Would compute phash for {filename}")
             performed_options.append("phash (dry run)")
-            if config.debug:
-                phash_elapsed = time.time() - phash_start
-                print(f"🟡 [DEBUG] Finished phash generation for {filename_pretty} in {phash_elapsed:.2f} seconds")
         else:
             try:
-                if config.phash_backend == "binary":
-                    proc = subprocess.run([binary, '-json', filename], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=120)
+                if binary_backend:
+                    proc = ffmpeg_utils.run([config.binary, '-json', filename], timeout=300)
                     phash = json.loads(proc.stdout.decode("utf-8"))['phash']
                 else:
-                    phash = compute_phash(filename, vaapi_device=vaapi_device)['phash']
+                    phash = compute_phash(filename, vaapi_device=vaapi_device if vaapi_supported else None)['phash']
                 update_phash(file_id, phash)
                 performed_options.append("phash")
                 if config.debug:
-                    phash_elapsed = time.time() - phash_start
-                    print(f"🟡 [DEBUG] Finished phash generation for {filename_pretty} in {phash_elapsed:.2f} seconds")
+                    print(f"🟡 [DEBUG] Finished phash generation for {filename_pretty} in {time.time() - phash_start:.2f} seconds")
             except Exception as e:
-                log_scene_failure(scene_id, filename_pretty, "hashing", e)
-                tag_scene_error(scene_id, hashing_error_tag, str(e))
+                detail = ffmpeg_utils.error_detail(e)
+                log_scene_failure(scene_id, filename_pretty, "hashing", detail)
+                tag_scene_error(scene_id, config.hashing_error_tag, detail)
                 success = False
                 # Don't return early - release_scene in finally block
 
+        # ── Cover ──────────────────────────────────────────
         try:
-            cover_image = scene['paths'].get('screenshot')
-            if cover_image and "<svg" in requests.get(cover_image, timeout=10).content.decode('latin_1').lower():
-                temp_dir = os.path.abspath(os.path.join(".tmp", f"cover_temp_{filehash}"))
-                os.makedirs(temp_dir, exist_ok=True)
-                image_filename = os.path.join(temp_dir, f"{filehash}_cover.jpg")
-                ffmpegcmd = [
-                    ffmpeg, '-hide_banner', '-loglevel', 'error',
-                    '-i', filename, '-ss', '00:00:30', '-vframes', '1',
-                    image_filename, '-nostdin'
-                ]
-                if config.debug:
-                    print(f"🟡 [DEBUG] Starting cover image extraction for {filename_pretty}")
-                    print(f"🟡 [DEBUG] CLI: {' '.join(ffmpegcmd)}")
-                    cover_start = time.time()
-                if config.dry_run:
-                    print(f"[DRY RUN] Would extract cover image using: {' '.join(ffmpegcmd)}")
-                    performed_options.append("cover (dry run)")
-                    if config.debug:
-                        cover_elapsed = time.time() - cover_start
-                        print(f"🟡 [DEBUG] Finished cover image extraction for {filename_pretty} in {cover_elapsed:.2f} seconds")
-                else:
-                    try:
-                        subprocess.run(ffmpegcmd, check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        if not os.path.exists(image_filename):
-                            ffmpegcmd[ffmpegcmd.index('-ss') + 1] = '00:00:05'
-                            subprocess.run(ffmpegcmd, check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        if not os.path.exists(image_filename):
-                            raise FileNotFoundError(f"Cover image not created: {image_filename}")
-                        with open(image_filename, "rb") as img:
-                            encoded = base64.b64encode(img.read()).decode()
-                        update_cover(scene_id, "data:image/jpg;base64," + encoded)
-                        performed_options.append("cover")
-                        if config.debug:
-                            cover_elapsed = time.time() - cover_start
-                            print(f"🟡 [DEBUG] Finished cover image extraction for {filename_pretty} in {cover_elapsed:.2f} seconds")
-                    except Exception as e:
-                        log_scene_failure(scene_id, filename_pretty, "cover image generation", e)
-                        tag_scene_error(scene_id, cover_error_tag, str(e))
-                    finally:
-                        shutil.rmtree(temp_dir, ignore_errors=True)
+            cover_image = (scene.get('paths') or {}).get('screenshot')
+            if cover_image and _cover_is_placeholder(cover_image):
+                _generate_cover(scene_id, filename, filename_pretty, filehash, performed_options)
         except Exception as e:
             log_scene_failure(scene_id, filename_pretty, "cover image setup", e)
-            tag_scene_error(scene_id, cover_error_tag, str(e))
+            tag_scene_error(scene_id, config.cover_error_tag, str(e))
 
+        # ── Sprite ─────────────────────────────────────────
         if config.generate_sprite:
-            sprite_file = os.path.join(sprite_path, f"{filehash}_sprite.jpg")
-            vtt_file = os.path.join(sprite_path, f"{filehash}_thumbs.vtt")
-            encoder_note = "VAAPI" if vaapi_supported else "software"
-            if not os.path.exists(sprite_file):
+            sprite_file = os.path.join(config.sprite_path, f"{filehash}_sprite.jpg")
+            vtt_file = os.path.join(config.sprite_path, f"{filehash}_thumbs.vtt")
+            if not (os.path.exists(sprite_file) and os.path.exists(vtt_file)):
                 if config.debug:
+                    encoder_note = "VAAPI" if vaapi_supported else "software"
                     print(f"🟡 [DEBUG] Starting sprite generation for {filename_pretty}")
                     print(f"🟡 [DEBUG] VideoSpriteGenerator: 81 frames × {encoder_note} extraction → PIL assembly → {sprite_file}")
-                    sprite_start = time.time()
                 if config.dry_run:
                     print(f"[DRY RUN] Would generate sprite for {filename_pretty} → {sprite_file}")
                     performed_options.append("sprite (dry run)")
-                    if config.debug:
-                        sprite_elapsed = time.time() - sprite_start
-                        print(f"🟡 [DEBUG] Finished sprite generation for {filename_pretty} in {sprite_elapsed:.2f} seconds")
                 else:
                     try:
-                        if not config.debug:
-                            sprite_start = time.time()
-                        generator = VideoSpriteGenerator(
-                            filename, sprite_file, vtt_file, filehash, ffmpeg, ffprobe,
+                        sprite_start = time.time()
+                        VideoSpriteGenerator(
+                            filename, sprite_file, vtt_file, filehash, config.ffmpeg, config.ffprobe,
                             use_vaapi=vaapi_supported, vaapi_device=vaapi_device
-                        )
-                        generator.generate_sprite()
-                        sprite_elapsed = time.time() - sprite_start
+                        ).generate_sprite()
                         performed_options.append("sprite")
-                        if config.verbose:
-                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Sprite generation complete for {filename_pretty} in {sprite_elapsed:.2f} seconds.")
+                        if config.debug:
+                            print(f"🟡 [DEBUG] Finished sprite generation for {filename_pretty} in {time.time() - sprite_start:.2f} seconds")
                     except Exception as e:
                         log_scene_failure(scene_id, filename_pretty, "sprite generation", e)
-                        tag_scene_error(scene_id, hashing_error_tag, str(e))
+                        tag_scene_error(scene_id, config.hashing_error_tag, str(e))
                         success = False
                         # Don't return early - continue to release scene
 
+        # ── Preview ────────────────────────────────────────
         if config.generate_preview:
-            preview_file = os.path.join(preview_path, f"{filehash}.mp4")
+            preview_file = os.path.join(config.preview_path, f"{filehash}.mp4")
             if not os.path.exists(preview_file):
                 if config.debug:
                     print(f"🟡 [DEBUG] Starting preview generation for {filename_pretty}")
-                    preview_start = time.time()
                 if config.dry_run:
                     print(f"[DRY RUN] Would generate preview for {filename_pretty} → {preview_file}")
                     performed_options.append("preview (dry run)")
-                    if config.debug:
-                        preview_elapsed = time.time() - preview_start
-                        print(f"🟡 [DEBUG] Finished preview generation for {filename_pretty} in {preview_elapsed:.2f} seconds")
                 else:
                     try:
-                        if vaapi_supported:
-                            vaapi_used = True
-                            performed_options.append("preview (vaapi)")
                         preview_start = time.time()
-                        generator = PreviewVideoGenerator(
+                        PreviewVideoGenerator(
                             filename, preview_file, filehash,
-                            ffmpeg=ffmpeg, ffprobe=ffprobe,
-                            preview_clips=preview_clips, clip_length=preview_clip_length,
-                            skip_seconds=preview_skip_seconds, include_audio=preview_audio,
+                            ffmpeg=config.ffmpeg, ffprobe=config.ffprobe,
+                            preview_clips=config.preview_clips, clip_length=config.preview_clip_length,
+                            skip_seconds=config.preview_skip_seconds, include_audio=config.preview_audio,
                             scene_id=scene_id, scene_name=filename_pretty,
                             use_vaapi=vaapi_supported, vaapi_device=vaapi_device
-                        )
-                        generator.generate_preview()
-                        preview_elapsed = time.time() - preview_start
-                        if not vaapi_used:
-                            performed_options.append("preview")
-                        if config.verbose:
-                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Preview generation complete for {filename_pretty} in {preview_elapsed:.2f} seconds.")
+                        ).generate_preview()
+                        performed_options.append("preview (vaapi)" if vaapi_supported else "preview")
+                        if config.debug:
+                            print(f"🟡 [DEBUG] Finished preview generation for {filename_pretty} in {time.time() - preview_start:.2f} seconds")
                     except Exception as e:
                         log_scene_failure(scene_id, filename_pretty, "preview generation", e)
-                        tag_scene_error(scene_id, hashing_error_tag, str(e))
+                        tag_scene_error(scene_id, config.hashing_error_tag, str(e))
                         success = False
                         # Don't return early - continue to release scene
 
-        # Integrated marker generation (if enabled)
-        if config.generate_markers:
+        # ── Markers (integrated mode) ──────────────────────
+        if config.generate_markers and success:
             try:
-                if success:  # Only generate markers if scene processing succeeded
-                    from helpers.marker_generator import MarkerGenerator
-                    from helpers.stash_utils import get_scene_markers_with_files, log_marker_failure
+                from helpers.marker_generator import MarkerGenerator
+                from helpers.stash_utils import get_scene_markers_with_files, log_marker_failure
 
-                    markers = get_scene_markers_with_files(scene_id)
+                markers = get_scene_markers_with_files(scene_id)
 
-                    if markers:
-                        if config.verbose:
-                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🎯 Found {len(markers)} markers for scene {scene_id}")
+                if markers and config.verbose:
+                    print(f"[{_now()}] 🎯 Found {len(markers)} markers for scene {scene_id}")
 
-                        for marker in markers:
-                            marker_id = marker['id']
-                            marker_seconds = marker['seconds']
-                            marker_title = marker.get('title', f"Marker at {marker_seconds}s")
+                for marker in markers or []:
+                    marker_id = marker['id']
+                    marker_seconds = marker['seconds']
+                    marker_title = marker.get('title') or f"Marker at {marker_seconds}s"
 
-                            if config.dry_run:
-                                print(f"[DRY RUN] Would generate marker media for {marker_title}")
-                                performed_options.append(f"marker {marker_id} (dry run)")
-                            else:
-                                try:
-                                    generator = MarkerGenerator(
-                                        filename, marker_seconds, filehash,
-                                        config.marker_path,
-                                        ffmpeg=ffmpeg, ffprobe=ffprobe,
-                                        preview_enabled=config.marker_preview_enabled,
-                                        thumbnail_enabled=config.marker_thumbnail_enabled,
-                                        screenshot_enabled=config.marker_screenshot_enabled,
-                                        preview_duration=config.marker_preview_duration,
-                                        thumbnail_duration=config.marker_thumbnail_duration,
-                                        thumbnail_fps=config.marker_thumbnail_fps,
-                                        use_vaapi=vaapi_supported,
-                                        vaapi_device=vaapi_device
-                                    )
+                    if config.dry_run:
+                        print(f"[DRY RUN] Would generate marker media for {marker_title}")
+                        performed_options.append(f"marker {marker_id} (dry run)")
+                        continue
+                    try:
+                        marker_result = MarkerGenerator(
+                            filename, marker_seconds, filehash,
+                            config.marker_path,
+                            ffmpeg=config.ffmpeg, ffprobe=config.ffprobe,
+                            preview_enabled=config.marker_preview_enabled,
+                            thumbnail_enabled=config.marker_thumbnail_enabled,
+                            screenshot_enabled=config.marker_screenshot_enabled,
+                            preview_duration=config.marker_preview_duration,
+                            thumbnail_duration=config.marker_thumbnail_duration,
+                            thumbnail_fps=config.marker_thumbnail_fps,
+                            use_vaapi=vaapi_supported,
+                            vaapi_device=vaapi_device
+                        ).generate_marker()
 
-                                    result = generator.generate_marker()
-
-                                    if result['success']:
-                                        files_str = ', '.join([os.path.basename(f) for f in result['files']])
-                                        performed_options.append(f"marker {marker_id}")
-                                        if config.verbose:
-                                            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Marker {marker_title} generated: {files_str}")
-                                    else:
-                                        log_marker_failure(marker_id, marker_title, "marker generation",
-                                                         result.get('error', 'Unknown error'))
-                                except Exception as e:
-                                    log_marker_failure(marker_id, marker_title, "marker generation", e)
-                                    # Don't fail scene processing for marker errors
+                        if marker_result['success']:
+                            files_str = ', '.join(os.path.basename(f) for f in marker_result['files'])
+                            performed_options.append(f"marker {marker_id}")
+                            if config.verbose and files_str:
+                                print(f"[{_now()}] ✅ Marker {marker_title} generated: {files_str}")
+                        else:
+                            log_marker_failure(marker_id, marker_title, "marker generation",
+                                               marker_result.get('error') or 'Unknown error')
+                    except Exception as e:
+                        log_marker_failure(marker_id, marker_title, "marker generation", e)
+                        # Don't fail scene processing for marker errors
             except Exception as e:
                 log_scene_failure(scene_id, filename_pretty, "marker discovery", e)
                 # Don't fail scene processing for marker discovery errors
 
-        end_time = time.time()
-        elapsed = end_time - start_time
-        options_str = ', '.join(performed_options) if performed_options else 'none'
-        vaapi_note = " (VAAPI used)" if vaapi_used else ""
         if config.verbose and success:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Processed scene file '{filename_pretty}' in {elapsed:.2f} seconds. Options performed: {options_str}{vaapi_note}")
+            options_str = ', '.join(performed_options) if performed_options else 'none'
+            print(f"[{_now()}] ✅ Processed scene file '{filename_pretty}' in {time.time() - start_time:.2f} seconds. Options performed: {options_str}")
 
-        return {'success': success, 'elapsed_time': elapsed, 'scene_id': scene_id}
+        return result(success)
 
     finally:
         release_scene(scene_id)

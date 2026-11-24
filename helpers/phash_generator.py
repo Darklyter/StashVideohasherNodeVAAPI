@@ -27,14 +27,15 @@
 
 import math
 import os
-import tempfile
 import subprocess
+import threading
 
 import numpy as np
 from PIL import Image
 from scipy.fft import dct
 
 import config
+from helpers import ffmpeg_utils
 
 # ─────────────────────────────────────────────
 # Constants (must match goimagehash PerceptionHash)
@@ -44,6 +45,7 @@ ROWS        = 5
 FRAME_COUNT = COLUMNS * ROWS   # 25
 FRAME_WIDTH = 160               # px — screenshotSize in Go source
 HASH_SIZE   = 8                 # 8×8 = 64-bit output
+FRAME_HEIGHT_EXPR = '-2'        # scale height: even, as the videohashes binary / Stash use (scale=160:-2)
 
 
 # ─────────────────────────────────────────────
@@ -108,87 +110,47 @@ def _nfnt_resize_bilinear(img_pil, dst_w, dst_h):
 
 def _get_duration(video_path):
     """Return video duration in seconds via ffprobe."""
-    result = subprocess.run(
-        [config.ffprobe,
-         '-v', 'error',
-         '-show_entries', 'format=duration',
-         '-of', 'default=noprint_wrappers=1:nokey=1',
-         video_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-        timeout=30,
-    )
-    return float(result.stdout.strip())
+    return ffmpeg_utils.probe_duration(video_path)
 
 
-def _extract_frame_software(video_path, timestamp):
-    """Extract one frame at `timestamp` via software decode. Returns PIL Image."""
-    fd, tmp = tempfile.mkstemp(suffix='.bmp')
-    os.close(fd)
-    try:
-        subprocess.run(
-            [config.ffmpeg,
-             '-ss', f'{timestamp:.6f}',
-             '-i', video_path,
-             '-frames:v', '1',
-             '-vf', f'scale={FRAME_WIDTH}:-1',
-             '-y', '-loglevel', 'error',
-             tmp],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=60,
-        )
-        img = Image.open(tmp)
-        return img.copy()
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.decode('utf-8', errors='replace').strip()
-        raise RuntimeError(f"ffmpeg frame extraction failed at {timestamp:.1f}s: {err}") from e
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
-def _extract_frame_vaapi(video_path, timestamp, vaapi_device):
-    """
-    Extract one frame at `timestamp` using VAAPI hardware decode + scale.
-    Falls back to software on failure.
-    """
-    fd, tmp = tempfile.mkstemp(suffix='.bmp')
-    os.close(fd)
-    try:
-        subprocess.run(
-            [config.ffmpeg,
-             '-vaapi_device', vaapi_device,
-             '-hwaccel', 'vaapi',
-             '-hwaccel_output_format', 'vaapi',
-             '-ss', f'{timestamp:.6f}',
-             '-i', video_path,
-             '-frames:v', '1',
-             '-vf', f'scale_vaapi={FRAME_WIDTH}:-1,hwdownload,format=bgr0',
-             '-y', '-loglevel', 'error',
-             tmp],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=60,
-        )
-        img = Image.open(tmp)
-        return img.copy()
-    except Exception:
-        # VAAPI decode may fail for unsupported codecs (e.g. AV1, VP9 on older drivers)
-        return _extract_frame_software(video_path, timestamp)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+def _frame_command(video_path, timestamp, output, vaapi_device=None):
+    if vaapi_device:
+        return [config.ffmpeg,
+                '-vaapi_device', vaapi_device,
+                '-hwaccel', 'vaapi',
+                '-hwaccel_output_format', 'vaapi',
+                '-ss', f'{timestamp:.6f}',
+                '-i', video_path,
+                '-frames:v', '1',
+                '-vf', f'scale_vaapi={FRAME_WIDTH}:{FRAME_HEIGHT_EXPR},hwdownload,format=bgr0',
+                '-y', '-loglevel', 'error',
+                output]
+    return [config.ffmpeg,
+            '-ss', f'{timestamp:.6f}',
+            '-i', video_path,
+            '-frames:v', '1',
+            '-vf', f'scale={FRAME_WIDTH}:{FRAME_HEIGHT_EXPR}',
+            '-y', '-loglevel', 'error',
+            output]
 
 
 def _extract_frame(video_path, timestamp, vaapi_device=None):
-    """Route frame extraction to VAAPI or software based on availability."""
-    if vaapi_device:
-        return _extract_frame_vaapi(video_path, timestamp, vaapi_device)
-    return _extract_frame_software(video_path, timestamp)
+    """
+    Extract one frame at `timestamp` (VAAPI decode when a device is given,
+    software otherwise). Returns a PIL Image; raises on failure.
+    """
+    tmp = ffmpeg_utils.tmp_path(f'phash_{os.getpid()}_{threading.get_ident()}.bmp')
+    try:
+        ffmpeg_utils.run(_frame_command(video_path, timestamp, tmp, vaapi_device), timeout=60)
+        with Image.open(tmp) as img:
+            return img.copy()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(
+            f"ffmpeg frame extraction failed at {timestamp:.1f}s: {ffmpeg_utils.error_detail(e)}"
+        ) from e
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _build_sprite(video_path, duration, vaapi_device=None):
@@ -201,11 +163,16 @@ def _build_sprite(video_path, duration, vaapi_device=None):
 
     frames = []
     for i in range(FRAME_COUNT):
-        ts    = offset + i * step_size
-        frame = _extract_frame(video_path, ts, vaapi_device=vaapi_device)
-        if frame is None:
-            frame = Image.new('RGB', (FRAME_WIDTH, FRAME_WIDTH), (0, 0, 0))
-        frames.append(frame)
+        ts = offset + i * step_size
+        if vaapi_device:
+            try:
+                frames.append(_extract_frame(video_path, ts, vaapi_device=vaapi_device))
+                continue
+            except Exception:
+                # VAAPI decode may fail for unsupported codecs (e.g. AV1, VP9 on
+                # older drivers) — use software for the rest of this video.
+                vaapi_device = None
+        frames.append(_extract_frame(video_path, ts))
 
     frame_w = frames[0].width
     frame_h = frames[0].height

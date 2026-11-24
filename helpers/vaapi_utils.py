@@ -1,13 +1,10 @@
+import glob
 import subprocess
 
 def vaapi_available():
     """Check if VAAPI is available on the system."""
-    # Try common VAAPI device paths
-    device_paths = [
-        "/dev/dri/renderD128",
-        "/dev/dri/card0",
-        "/dev/dri/card1"
-    ]
+    # Render nodes first (renderD128, renderD129, ... — one per GPU), then legacy card nodes
+    device_paths = sorted(glob.glob("/dev/dri/renderD*")) + sorted(glob.glob("/dev/dri/card*"))
     for device in device_paths:
         try:
             result = subprocess.run(

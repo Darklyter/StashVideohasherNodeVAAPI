@@ -1,11 +1,11 @@
 # marker_generator.py
 
-import subprocess
 import os
-import shutil
 import time
-from datetime import datetime
-from config import verbose, nvenc
+
+import config
+from helpers import ffmpeg_utils
+
 
 class MarkerGenerator:
     def __init__(self, video_path, marker_seconds, oshash, output_base_dir,
@@ -57,223 +57,106 @@ class MarkerGenerator:
         self.use_vaapi = use_vaapi
         self.vaapi_device = vaapi_device
 
-        # Temp directory
-        self.temp_dir = os.path.abspath(os.path.join(".tmp", f"marker_{oshash}_{self.marker_int}"))
+    def _run_to(self, final_path, build_command, timeout, label):
+        """
+        Run an ffmpeg command that writes `final_path` (via a temp file).
+        Returns None on success, or an error string.
+        """
+        try:
+            with ffmpeg_utils.atomic_output(final_path) as tmp_output:
+                ffmpeg_utils.run(build_command(tmp_output), timeout=timeout)
+            return None
+        except Exception as e:
+            detail = ffmpeg_utils.error_detail(e)
+            print(f"⚠️ Failed to generate {label}: {detail}")
+            return f"{label} failed: {detail}"
 
     def generate_preview(self):
-        """
-        Generate MP4 preview (20-second clip starting at marker timestamp).
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if not self.preview_enabled:
-            return False
-
-        os.makedirs(os.path.dirname(self.mp4_path), exist_ok=True)
-
+        """Generate MP4 preview (clip starting at marker timestamp). Returns error string or None."""
         use_vaapi = bool(self.use_vaapi) and bool(self.vaapi_device)
+        input_opts, output_opts = ffmpeg_utils.h264_encode_args(use_vaapi, self.vaapi_device, width=640)
 
-        if use_vaapi:
-            # VAAPI hardware-accelerated encoding
-            command = [
-                self.ffmpeg, '-y',
-                '-vaapi_device', self.vaapi_device,
-                '-ss', str(self.marker_seconds),
-                '-t', str(self.preview_duration),
-                '-i', self.video_path,
-                '-vf', 'format=nv12,hwupload,scale_vaapi=640:-2',
-                '-c:v', 'h264_vaapi',
-                '-global_quality', '18',
-                '-an',
-                '-loglevel', 'quiet',
-                self.mp4_path
-            ]
-        elif nvenc:
-            # NVENC hardware-accelerated encoding
-            command = [
-                self.ffmpeg, '-y',
-                '-ss', str(self.marker_seconds),
-                '-t', str(self.preview_duration),
-                '-i', self.video_path,
-                '-vf', 'scale=640:-2',
-                '-c:v', 'h264_nvenc',
-                '-cq:v', '18',
-                '-preset', 'p4',
-                '-an',
-                '-loglevel', 'quiet',
-                self.mp4_path
-            ]
-        else:
-            # Software encoding fallback
-            command = [
-                self.ffmpeg, '-y',
-                '-ss', str(self.marker_seconds),
-                '-t', str(self.preview_duration),
-                '-i', self.video_path,
-                '-vf', 'scale=640:-2',
-                '-c:v', 'libx264',
-                '-crf', '18',
-                '-preset', 'slow',
-                '-an',
-                '-loglevel', 'quiet',
-                self.mp4_path
-            ]
+        def build(output):
+            return ([self.ffmpeg, '-y'] + input_opts +
+                    ['-ss', str(self.marker_seconds), '-t', str(self.preview_duration),
+                     '-i', self.video_path] +
+                    output_opts + ['-an', '-loglevel', 'error', output])
 
-        try:
-            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
-            return os.path.exists(self.mp4_path)
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr.decode('utf-8', errors='replace').strip().splitlines()
-            detail = stderr[-1] if stderr else str(e)
-            print(f"⚠️ Failed to generate MP4 preview: {detail}")
-            return False
+        return self._run_to(self.mp4_path, build, 300, "MP4 preview")
 
     def generate_thumbnail(self):
-        """
-        Generate WebP animated thumbnail (5-second animation at 12fps).
+        """Generate WebP animated thumbnail. Returns error string or None."""
+        def build(output):
+            return [
+                self.ffmpeg, '-y',
+                '-ss', str(self.marker_seconds),
+                '-t', str(self.thumbnail_duration),
+                '-i', self.video_path,
+                '-vf', f'scale=640:-2,fps={self.thumbnail_fps}',
+                '-c:v', 'libwebp',
+                '-lossless', '1',
+                '-q:v', '70',
+                '-compression_level', '6',
+                '-preset', 'default',
+                '-loop', '0',  # Infinite loop
+                '-loglevel', 'error',
+                output
+            ]
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if not self.thumbnail_enabled:
-            return False
-
-        os.makedirs(os.path.dirname(self.webp_path), exist_ok=True)
-
-        command = [
-            self.ffmpeg, '-y',
-            '-ss', str(self.marker_seconds),
-            '-t', str(self.thumbnail_duration),
-            '-i', self.video_path,
-            '-vf', f'scale=640:-2,fps={self.thumbnail_fps}',
-            '-c:v', 'libwebp',
-            '-lossless', '1',
-            '-q:v', '70',
-            '-compression_level', '6',
-            '-preset', 'default',
-            '-loop', '0',  # Infinite loop
-            '-loglevel', 'quiet',
-            self.webp_path
-        ]
-
-        try:
-            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-            return os.path.exists(self.webp_path)
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr.decode('utf-8', errors='replace').strip().splitlines()
-            detail = stderr[-1] if stderr else str(e)
-            print(f"⚠️ Failed to generate WebP thumbnail: {detail}")
-            return False
+        return self._run_to(self.webp_path, build, 180, "WebP thumbnail")
 
     def generate_screenshot(self):
-        """
-        Generate JPG screenshot (single frame at marker timestamp).
+        """Generate JPG screenshot (single frame at marker timestamp). Returns error string or None."""
+        def build(output):
+            return [
+                self.ffmpeg, '-y',
+                '-ss', str(self.marker_seconds),
+                '-i', self.video_path,
+                '-vframes', '1',
+                '-q:v', '2',  # High quality
+                '-loglevel', 'error',
+                output
+            ]
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if not self.screenshot_enabled:
-            return False
-
-        os.makedirs(os.path.dirname(self.jpg_path), exist_ok=True)
-
-        command = [
-            self.ffmpeg, '-y',
-            '-ss', str(self.marker_seconds),
-            '-i', self.video_path,
-            '-vframes', '1',
-            '-q:v', '2',  # High quality
-            '-loglevel', 'quiet',
-            self.jpg_path
-        ]
-
-        try:
-            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-            return os.path.exists(self.jpg_path)
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr.decode('utf-8', errors='replace').strip().splitlines()
-            detail = stderr[-1] if stderr else str(e)
-            print(f"⚠️ Failed to generate JPG screenshot: {detail}")
-            return False
-
-    def clean_temp_dirs(self):
-        """Clean up temporary directories."""
-        if os.path.exists(self.temp_dir):
-            try:
-                shutil.rmtree(self.temp_dir)
-            except Exception as e:
-                if verbose:
-                    print(f"⚠️ Failed to remove temp directory: {e}")
+        return self._run_to(self.jpg_path, build, 60, "JPG screenshot")
 
     def generate_marker(self):
         """
-        Main orchestrator for marker generation.
-        Generates all enabled media types (MP4, WebP, JPG).
+        Generate every enabled media type (MP4, WebP, JPG) that does not exist yet.
 
         Returns:
             dict: Result dictionary with keys:
-                - success: bool (True if at least one file generated)
-                - files: list of successfully generated file paths
+                - success: bool (True only if every enabled file now exists)
+                - files: list of files generated by this call
                 - elapsed_time: float (total generation time)
-                - error: str (error message if failed)
+                - error: str (error messages if anything failed)
         """
         start_time = time.time()
         generated_files = []
         errors = []
 
+        steps = [
+            (self.preview_enabled, self.mp4_path, self.generate_preview),
+            (self.thumbnail_enabled, self.webp_path, self.generate_thumbnail),
+            (self.screenshot_enabled, self.jpg_path, self.generate_screenshot),
+        ]
+
         try:
-            # Create output directory
             os.makedirs(self.output_dir, exist_ok=True)
-
-            # Generate MP4 preview
-            if self.preview_enabled:
-                if self.generate_preview():
-                    generated_files.append(self.mp4_path)
+            for enabled, path, generate in steps:
+                if not enabled or os.path.exists(path):
+                    continue
+                error = generate()
+                if error:
+                    errors.append(error)
                 else:
-                    errors.append("MP4 preview generation failed")
-
-            # Generate WebP thumbnail
-            if self.thumbnail_enabled:
-                if self.generate_thumbnail():
-                    generated_files.append(self.webp_path)
-                else:
-                    errors.append("WebP thumbnail generation failed")
-
-            # Generate JPG screenshot
-            if self.screenshot_enabled:
-                if self.generate_screenshot():
-                    generated_files.append(self.jpg_path)
-                else:
-                    errors.append("JPG screenshot generation failed")
-
-            elapsed_time = time.time() - start_time
-
-            if generated_files:
-                return {
-                    'success': True,
-                    'files': generated_files,
-                    'elapsed_time': elapsed_time,
-                    'error': None
-                }
-            else:
-                error_msg = '; '.join(errors) if errors else "No files generated"
-                return {
-                    'success': False,
-                    'files': [],
-                    'elapsed_time': elapsed_time,
-                    'error': error_msg
-                }
-
+                    generated_files.append(path)
         except Exception as e:
-            elapsed_time = time.time() - start_time
-            return {
-                'success': False,
-                'files': generated_files,
-                'elapsed_time': elapsed_time,
-                'error': str(e)
-            }
+            errors.append(str(e))
 
-        finally:
-            # Always clean up temp directories
-            self.clean_temp_dirs()
+        return {
+            'success': not errors,
+            'files': generated_files,
+            'elapsed_time': time.time() - start_time,
+            'error': '; '.join(errors) if errors else None,
+        }

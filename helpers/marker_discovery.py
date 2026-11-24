@@ -2,6 +2,7 @@
 
 import os
 from helpers.stash_utils import stash
+from helpers.paths import translate_path, is_excluded
 import config
 
 _PAGE_SIZE = 100
@@ -16,13 +17,6 @@ query findSceneMarkers($scene_marker_filter: SceneMarkerFilterType, $filter: Fin
     }
 }
 """
-
-def translate_path(docker_path):
-    """Translate Stash/Docker paths to local paths using config.translations"""
-    for t in config.translations:
-        if docker_path.startswith(t['orig']):
-            return docker_path.replace(t['orig'], t['local'], 1)
-    return docker_path
 
 def discover_missing_markers(limit=None):
     """
@@ -45,7 +39,7 @@ def discover_missing_markers(limit=None):
     while True:
         result = stash.call_GQL(_MARKER_QUERY, {
             "scene_marker_filter": {},
-            "filter": {"per_page": _PAGE_SIZE, "page": page}
+            "filter": {"per_page": _PAGE_SIZE, "page": page, "sort": "id", "direction": "ASC"}
         })
         markers = result.get("findSceneMarkers", {}).get("scene_markers", [])
 
@@ -77,7 +71,7 @@ def discover_missing_markers(limit=None):
             if not oshash or not video_path:
                 continue
 
-            if config.excluded_paths and any(video_path.startswith(ep) for ep in config.excluded_paths):
+            if is_excluded(video_path):
                 continue
 
             marker_dir = os.path.join(config.marker_path, "markers", oshash)

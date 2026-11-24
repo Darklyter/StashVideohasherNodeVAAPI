@@ -2,44 +2,53 @@
 
 import argparse
 import os
-import shutil
-import time
-import threading
-import subprocess
 import signal
 import sys
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
+from datetime import datetime
+from itertools import islice
 
 import config
+from helpers import ffmpeg_utils
+from helpers.ffmpeg_utils import shutdown_event, ShutdownRequested
 from helpers.scene_discovery import discover_scenes
 from helpers.scene_processor import process_scene
-from helpers.stash_utils import get_total_scene_count, get_error_scenes, clear_error_tags, get_hashing_scenes, clear_hashing_tags, reset_terminal
+from helpers.stash_utils import (
+    get_total_scene_count, get_error_scenes, clear_error_tags, get_hashing_scenes,
+    clear_hashing_tags, reset_terminal, log_scene_failure, log_marker_failure, tag_scene_error
+)
 from helpers.health_check import run_health_check
 from helpers.statistics import batch_stats
 
-# Global shutdown flag and event for signal handling
-shutdown_requested = False
-shutdown_event = threading.Event()
+_signal_count = 0
+
+
+def _now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def apply_cli_args(args):
-    config.windows = args.windows
+    """Apply CLI flags on top of config.py. A flag only overrides config when it was actually passed."""
+    if args.windows:
+        print("⚠️ --windows is deprecated and ignored: the platform is detected automatically.")
     if args.generate_sprite:
         config.generate_sprite = True
     if args.generate_preview:
         config.generate_preview = True
-    config.dry_run = args.dry_run
-    config.verbose = args.verbose
-    config.once = args.once
-    config.debug = args.debug
-    if args.batch_size:
-        if args.batch_size < 1:
-            print(f"❌ --batch-size must be at least 1 (got {args.batch_size})")
-            sys.exit(1)
-        config.per_page = args.batch_size
-    if args.max_workers:
-        config.max_workers = args.max_workers
+    for name in ("dry_run", "verbose", "once", "debug", "generate_markers"):
+        value = getattr(args, name)
+        if value is not None:
+            setattr(config, name, value)
+    for flag, value, target in (("--batch-size", args.batch_size, "per_page"),
+                                ("--max-workers", args.max_workers, "max_workers"),
+                                ("--marker-batch-size", args.marker_batch_size, "marker_batch_size")):
+        if value is not None:
+            if value < 1:
+                print(f"❌ {flag} must be at least 1 (got {value})")
+                sys.exit(1)
+            setattr(config, target, value)
     if args.batch_sleep is not None:
-        config.batch_sleep = args.batch_sleep
+        config.batch_sleep = max(0, args.batch_sleep)
     if args.filemask:
         config.filemask = args.filemask
     if args.nvenc:
@@ -51,11 +60,6 @@ def apply_cli_args(args):
         config.vaapi_override = True
     elif args.novaapi:
         config.vaapi_override = False
-
-    # Marker generation settings (both --generate-markers and --standalone-markers)
-    config.generate_markers = args.generate_markers
-    if args.marker_batch_size:
-        config.marker_batch_size = args.marker_batch_size
 
     # Handle marker media type overrides
     if args.marker_preview_only:
@@ -71,90 +75,75 @@ def apply_cli_args(args):
         config.marker_thumbnail_enabled = False
         config.marker_screenshot_enabled = True
 
+
 def signal_handler(signum, frame):
-    """Handle termination signals gracefully"""
-    global shutdown_requested
+    """First signal: stop running jobs and exit cleanly. Second signal: force quit."""
+    global _signal_count
+    _signal_count += 1
     signal_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
-    print(f"\n🛑 Received {signal_name}. Shutting down gracefully...")
-    shutdown_requested = True
-    shutdown_event.set()
+    if _signal_count == 1:
+        print(f"\n🛑 Received {signal_name}. Stopping running jobs and exiting... (press Ctrl+C again to force quit)")
+        ffmpeg_utils.request_shutdown()
+    else:
+        print("\n🛑 Forced exit. Scenes left tagged as in-process can be released with --clear-hashing-tags.")
+        ffmpeg_utils.kill_all()
+        reset_terminal()
+        os._exit(130)
 
-def clean_temp_dirs(recreate=True):
-    tmp_dir = os.path.join(os.getcwd(), ".tmp")
-
-    # Remove entire .tmp directory if it exists
-    if os.path.exists(tmp_dir):
-        try:
-            shutil.rmtree(tmp_dir)
-            if config.verbose:
-                print(f"🧹 Cleaned temporary directory: .tmp")
-        except Exception as e:
-            if config.verbose:
-                print(f"⚠️ Failed to remove .tmp: {e}")
-
-    # Create fresh .tmp directory (unless we're exiting)
-    if recreate:
-        try:
-            os.makedirs(tmp_dir, exist_ok=True)
-        except Exception as e:
-            if config.verbose:
-                print(f"⚠️ Failed to create .tmp: {e}")
 
 def process_sprite(scene_data, index, total, vaapi_supported, vaapi_device):
     """Process a single sprite for standalone mode."""
     import time
-    from datetime import datetime
     from helpers.video_sprite_generator import VideoSpriteGenerator
-    from helpers.stash_utils import log_scene_failure
 
     start_time = time.time()
     scene_id = scene_data['scene_id']
     oshash = scene_data['oshash']
     scene_title = scene_data['scene_title']
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] 🖼️ Sprite #{index} of {total}: Scene {scene_id} — {scene_title}")
+    print(f"[{_now()}] 🖼️ Sprite #{index} of {total}: Scene {scene_id} — {scene_title}")
 
     sprite_file = os.path.join(config.sprite_path, f"{oshash}_sprite.jpg")
     vtt_file = os.path.join(config.sprite_path, f"{oshash}_thumbs.vtt")
 
+    if config.dry_run:
+        print(f"[DRY RUN] Would generate sprite for scene {scene_id} → {sprite_file}")
+        return {'success': True, 'elapsed_time': 0, 'scene_id': scene_id}
+
     try:
-        generator = VideoSpriteGenerator(
+        VideoSpriteGenerator(
             scene_data['video_path'], sprite_file, vtt_file, oshash,
             config.ffmpeg, config.ffprobe,
             use_vaapi=vaapi_supported, vaapi_device=vaapi_device
-        )
-        generator.generate_sprite()
-        elapsed = time.time() - start_time
-
-        if config.verbose:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Sprite generated in {elapsed:.2f}s")
-        return {'success': True, 'elapsed_time': elapsed, 'scene_id': scene_id}
+        ).generate_sprite()
+        return {'success': True, 'elapsed_time': time.time() - start_time, 'scene_id': scene_id}
 
     except Exception as e:
-        elapsed = time.time() - start_time
-        log_scene_failure(scene_id, scene_title, "sprite generation", str(e))
-        return {'success': False, 'elapsed_time': elapsed, 'scene_id': scene_id}
+        log_scene_failure(scene_id, scene_title, "sprite generation", e)
+        tag_scene_error(scene_id, config.hashing_error_tag, f"sprite generation: {e}")
+        return {'success': False, 'elapsed_time': time.time() - start_time, 'scene_id': scene_id}
+
 
 def process_preview(scene_data, index, total, vaapi_supported, vaapi_device):
     """Process a single preview for standalone mode."""
     import time
-    from datetime import datetime
     from helpers.preview_video_generator import PreviewVideoGenerator
-    from helpers.stash_utils import log_scene_failure
 
     start_time = time.time()
     scene_id = scene_data['scene_id']
     oshash = scene_data['oshash']
     scene_title = scene_data['scene_title']
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] 🎞️ Preview #{index} of {total}: Scene {scene_id} — {scene_title}")
+    print(f"[{_now()}] 🎞️ Preview #{index} of {total}: Scene {scene_id} — {scene_title}")
 
     preview_file = os.path.join(config.preview_path, f"{oshash}.mp4")
 
+    if config.dry_run:
+        print(f"[DRY RUN] Would generate preview for scene {scene_id} → {preview_file}")
+        return {'success': True, 'elapsed_time': 0, 'scene_id': scene_id}
+
     try:
-        generator = PreviewVideoGenerator(
+        PreviewVideoGenerator(
             scene_data['video_path'], preview_file, oshash,
             ffmpeg=config.ffmpeg, ffprobe=config.ffprobe,
             preview_clips=config.preview_clips,
@@ -163,25 +152,19 @@ def process_preview(scene_data, index, total, vaapi_supported, vaapi_device):
             include_audio=config.preview_audio,
             scene_id=scene_id, scene_name=scene_title,
             use_vaapi=vaapi_supported, vaapi_device=vaapi_device
-        )
-        generator.generate_preview()
-        elapsed = time.time() - start_time
-
-        if config.verbose:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Preview generated in {elapsed:.2f}s")
-        return {'success': True, 'elapsed_time': elapsed, 'scene_id': scene_id}
+        ).generate_preview()
+        return {'success': True, 'elapsed_time': time.time() - start_time, 'scene_id': scene_id}
 
     except Exception as e:
-        elapsed = time.time() - start_time
-        log_scene_failure(scene_id, scene_title, "preview generation", str(e))
-        return {'success': False, 'elapsed_time': elapsed, 'scene_id': scene_id}
+        log_scene_failure(scene_id, scene_title, "preview generation", e)
+        tag_scene_error(scene_id, config.hashing_error_tag, f"preview generation: {e}")
+        return {'success': False, 'elapsed_time': time.time() - start_time, 'scene_id': scene_id}
+
 
 def process_marker(marker_data, index, total, vaapi_supported, vaapi_device):
     """Process a single marker for standalone mode."""
     import time
-    from datetime import datetime
     from helpers.marker_generator import MarkerGenerator
-    from helpers.stash_utils import log_marker_failure
 
     start_time = time.time()
     marker_id = marker_data['marker_id']
@@ -189,11 +172,14 @@ def process_marker(marker_data, index, total, vaapi_supported, vaapi_device):
     scene_id = marker_data['scene_id']
     scene_title = marker_data.get('scene_title', f"Scene {scene_id}")
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] 🎯 Marker #{index} of {total}: ID {marker_id} — {marker_title or '(untitled)'} | Scene {scene_id} — {scene_title}")
+    print(f"[{_now()}] 🎯 Marker #{index} of {total}: ID {marker_id} — {marker_title or '(untitled)'} | Scene {scene_id} — {scene_title}")
+
+    if config.dry_run:
+        print(f"[DRY RUN] Would generate marker media for marker {marker_id}")
+        return {'success': True, 'elapsed_time': 0, 'marker_id': marker_id}
 
     try:
-        generator = MarkerGenerator(
+        result = MarkerGenerator(
             marker_data['video_path'], marker_data['seconds'], marker_data['oshash'],
             config.marker_path,
             ffmpeg=config.ffmpeg, ffprobe=config.ffprobe,
@@ -205,34 +191,217 @@ def process_marker(marker_data, index, total, vaapi_supported, vaapi_device):
             thumbnail_fps=config.marker_thumbnail_fps,
             use_vaapi=vaapi_supported,
             vaapi_device=vaapi_device
-        )
-
-        result = generator.generate_marker()
+        ).generate_marker()
         elapsed = time.time() - start_time
 
         if result['success']:
-            files_str = ', '.join([os.path.basename(f) for f in result['files']])
             if config.verbose:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Generated {files_str} in {elapsed:.2f}s")
+                files_str = ', '.join(os.path.basename(f) for f in result['files'])
+                print(f"[{_now()}] ✅ Generated {files_str} in {elapsed:.2f}s")
             return {'success': True, 'elapsed_time': elapsed, 'marker_id': marker_id}
-        else:
-            log_marker_failure(marker_id, marker_title, "generation", result.get('error', 'Unknown'))
-            return {'success': False, 'elapsed_time': elapsed, 'marker_id': marker_id}
-
-    except Exception as e:
-        elapsed = time.time() - start_time
-        log_marker_failure(marker_id, marker_title, "generation", str(e))
+        log_marker_failure(marker_id, marker_title, "generation", result.get('error') or 'Unknown')
         return {'success': False, 'elapsed_time': elapsed, 'marker_id': marker_id}
 
+    except Exception as e:
+        log_marker_failure(marker_id, marker_title, "generation", e)
+        return {'success': False, 'elapsed_time': time.time() - start_time, 'marker_id': marker_id}
+
+
+def run_batch(items, worker, desc, unit, timeout, vaapi_supported, vaapi_device):
+    """
+    Run `worker(item, index, total, vaapi_supported, vaapi_device)` for every item
+    on the thread pool, record statistics and print the batch summary.
+    Returns promptly once shutdown is requested.
+    """
+    batch_stats.start_batch(len(items))
+    executor = ThreadPoolExecutor(max_workers=config.max_workers)
+    try:
+        futures = [executor.submit(worker, item, idx, len(items), vaapi_supported, vaapi_device)
+                   for idx, item in enumerate(items, start=1)]
+
+        if config.verbose:
+            from tqdm import tqdm
+            print()  # Blank line before progress bar
+            iterator = tqdm(futures, desc=desc, unit=unit, total=len(futures),
+                            leave=True, dynamic_ncols=True, position=0)
+        else:
+            iterator = futures
+
+        for future in iterator:
+            waited = 0.0
+            while not future.done() and not shutdown_event.is_set() and waited < timeout:
+                wait_futures([future], timeout=0.5)
+                waited += 0.5
+            if shutdown_event.is_set():
+                break
+            if not future.done():
+                print(f"⚠️ {unit.capitalize()} processing timed out after {timeout // 60} minutes")
+                batch_stats.record_failure()
+                continue
+            try:
+                result = future.result()
+            except ShutdownRequested:
+                break
+            except Exception as e:
+                print(f"⚠️ Worker thread error: {e}")
+                batch_stats.record_failure()
+                continue
+            if result and result.get('success'):
+                batch_stats.record_success(result.get('elapsed_time'))
+            elif result and (result.get('interrupted') or result.get('skipped')):
+                pass  # neither a success nor a failure
+            else:
+                batch_stats.record_failure()
+
+        if shutdown_event.is_set():
+            print("🛑 Shutdown requested. Cancelling remaining work...")
+        print(batch_stats.get_summary())
+    finally:
+        # In-flight workers stop within moments of shutdown (their child processes
+        # are terminated); wait for them so claims are released and temp files removed.
+        executor.shutdown(wait=True, cancel_futures=shutdown_event.is_set())
+
+
+def sleep_between_batches():
+    """Returns True when shutdown was requested during the wait."""
+    if config.batch_sleep > 0:
+        print(f"⏳ Waiting {config.batch_sleep}s before next batch... Press Ctrl+C to cancel.")
+        return shutdown_event.wait(timeout=config.batch_sleep)
+    return shutdown_event.is_set()
+
+
+def run_standalone(args, vaapi_supported, vaapi_device):
+    """
+    Standalone generation modes. The library is scanned once per run; each batch
+    takes the next items from that scan, so nothing is rediscovered (and a
+    permanently failing item cannot loop forever).
+    """
+    sources = []
+
+    if args.standalone_sprites:
+        from helpers.sprite_discovery import iter_missing_sprites
+        print("🖼️ Discovering scenes missing sprites...")
+        sources.append(dict(items=iter_missing_sprites(), size=args.sprite_batch_size or 25,
+                            worker=process_sprite, desc="🖼️ Generating Sprites", unit="sprite",
+                            timeout=600, what="scenes needing sprites", done="✅ All scenes have sprites"))
+
+    if args.standalone_previews:
+        from helpers.preview_discovery import iter_missing_previews
+        print("🎞️ Discovering scenes missing previews...")
+        sources.append(dict(items=iter_missing_previews(), size=args.preview_batch_size or 25,
+                            worker=process_preview, desc="🎞️ Generating Previews", unit="preview",
+                            timeout=600, what="scenes needing previews", done="✅ All scenes have previews"))
+
+    if args.standalone_markers:
+        from helpers.marker_discovery import discover_missing_markers
+        print("🎯 Discovering scenes with markers needing media generation...")
+        by_scene = {}
+        for marker in discover_missing_markers():
+            by_scene.setdefault(marker['scene_id'], []).append(marker)
+        # One item per scene, so every marker of a scene stays in the same batch
+        sources.append(dict(items=iter(by_scene.values()), size=config.marker_batch_size, grouped=True,
+                            worker=process_marker, desc="🎯 Processing Markers", unit="marker",
+                            timeout=300, what="markers needing generation", done="✅ All markers have required media"))
+
+    while not shutdown_event.is_set():
+        ffmpeg_utils.clean_tmp()
+        work_found = False
+
+        for source in sources:
+            if shutdown_event.is_set() or source.get('exhausted'):
+                continue
+            batch = list(islice(source['items'], source['size']))
+            if source.get('grouped'):
+                batch = [marker for group in batch for marker in group]
+            if not batch:
+                source['exhausted'] = True
+                print(source['done'])
+                continue
+            work_found = True
+            print(f"📦 Found {len(batch)} {source['what']}")
+            run_batch(batch, source['worker'], source['desc'], source['unit'], source['timeout'],
+                      vaapi_supported, vaapi_device)
+
+        if shutdown_event.is_set():
+            break
+        if not work_found:
+            print("✅ No remaining work found. Exiting.")
+            break
+        if config.once:
+            print("✅ Finished single batch. Exiting due to --once flag.")
+            break
+        if sleep_between_batches():
+            break
+
+
+def run_scenes(args, vaapi_supported, vaapi_device):
+    """Default mode: phash + cover (+ sprite / preview / markers) for scenes missing a phash."""
+    retry_queue = None
+    empty_pages = 0
+
+    while not shutdown_event.is_set():
+        ffmpeg_utils.clean_tmp()
+
+        if args.retry_errors:
+            # Take one snapshot of the error scenes and work through it; scenes that
+            # fail again are re-tagged but not retried again in this run.
+            if retry_queue is None:
+                print("🔄 Fetching scenes with error tags for retry...")
+                retry_queue = list(get_error_scenes() or [])
+                if not retry_queue:
+                    print("✅ No error scenes to retry. Exiting.")
+                    break
+            scenes = retry_queue[:config.per_page]
+            del retry_queue[:config.per_page]
+            if not scenes:
+                print("✅ Finished retrying error scenes. Exiting.")
+                break
+            total_database = len(scenes) + len(retry_queue)
+            # Clear error tags so they can be reprocessed
+            clear_error_tags([s['id'] for s in scenes])
+        else:
+            total_database = get_total_scene_count()
+            if total_database == 0:
+                print("✅ No scenes to process. Exiting.")
+                break
+            scenes = discover_scenes(total_database)
+            if not scenes:
+                # Another node emptied the page between the count and the fetch
+                empty_pages += 1
+                if empty_pages >= 5:
+                    print("✅ No scenes to process right now. Exiting.")
+                    break
+                if shutdown_event.wait(timeout=2):
+                    break
+                continue
+            empty_pages = 0
+
+        print(f"[{_now()}] 🎯 Selected page with {len(scenes)} scenes (out of {total_database} total)")
+        run_batch(scenes, process_scene, "📦 Processing Batch", "scene", 600, vaapi_supported, vaapi_device)
+
+        if shutdown_event.is_set():
+            break
+        if config.once:
+            print("✅ Finished single batch. Exiting due to --once flag.")
+            break
+        if sleep_between_batches():
+            break
+
+
 def main():
+    # Relative paths in config.py (binary, error log) are relative to the project,
+    # not to wherever the script was started from (cron, systemd, ...)
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
     parser = argparse.ArgumentParser(
         description=(
             "VAAPI-accelerated Stash video processor.\n\n"
             "DEFAULT BEHAVIOR (no options): Discovers scenes missing a phash, then generates\n"
             "phash + cover image for each one. Sprite and preview generation also run if\n"
-            "enabled in config.py (generate_sprite / generate_preview). Marker generation\n"
-            "is off by default. Loops continuously until all scenes are processed.\n"
-            "All generation types can be forced on via flags below regardless of config."
+            "enabled in config.py (generate_sprite / generate_preview / generate_markers).\n"
+            "Loops continuously until all scenes are processed. All generation types can\n"
+            "be forced on via flags below regardless of config.\n\n"
+            "Ctrl+C stops running jobs and exits cleanly; press it twice to force quit."
         ),
         epilog="""
 Default run (loops until complete, runs whatever is enabled in config.py):
@@ -262,25 +431,25 @@ Other useful options:
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    parser.add_argument("--version", action="version", version="%(prog)s 1.3.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.4.0")
 
     # Basic options
     basic = parser.add_argument_group('Basic Options')
-    basic.add_argument("--windows", action="store_true", help="Use Windows-style paths and binaries")
+    basic.add_argument("--windows", action="store_true", help=argparse.SUPPRESS)  # deprecated: platform is auto-detected
     basic.add_argument("--batch-size", type=int, help="Number of scenes to process per run (default: 25)")
     basic.add_argument("--max-workers", type=int, help="Number of threads for parallel processing (default: 4)")
     basic.add_argument("--batch-sleep", type=int, help="Seconds to wait between batches (default: 5, 0 = no delay)")
-    basic.add_argument("--dry-run", action="store_true", help="Simulate processing without writing changes")
-    basic.add_argument("--verbose", action="store_true", help="Enable detailed output and progress bars")
-    basic.add_argument("--debug", action="store_true", help="Enable debug output including step notifications and ffmpeg commands")
-    basic.add_argument("--once", action="store_true", help="Run a single batch and exit (don't loop)")
+    basic.add_argument("--dry-run", action="store_true", default=None, help="Simulate processing without writing changes")
+    basic.add_argument("--verbose", action="store_true", default=None, help="Enable detailed output and progress bars")
+    basic.add_argument("--debug", action="store_true", default=None, help="Enable debug output including step notifications and ffmpeg commands")
+    basic.add_argument("--once", action="store_true", default=None, help="Run a single batch and exit (don't loop)")
     basic.add_argument("--filemask", type=str, help="Filter scenes by filename pattern (e.g., 'JoonMali*' or '*.mp4')")
 
     # Integrated scene processing
     integrated = parser.add_argument_group('Integrated Scene Processing', 'Enable media generation during scene processing')
     integrated.add_argument("--generate-sprite", action="store_true", help="Generate sprite sheets during scene processing")
     integrated.add_argument("--generate-preview", action="store_true", help="Generate preview videos during scene processing")
-    integrated.add_argument("--generate-markers", action="store_true", help="Generate marker media (MP4/WebP/JPG) during scene processing")
+    integrated.add_argument("--generate-markers", action="store_true", default=None, help="Generate marker media (MP4/WebP/JPG) during scene processing")
 
     # Standalone generation modes
     standalone = parser.add_argument_group('Standalone Generation Modes', 'Generate media without full scene processing')
@@ -318,8 +487,21 @@ Other useful options:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
+    try:
+        exit_code = _run(args)
+    finally:
+        ffmpeg_utils.clean_tmp(final=True)
+        reset_terminal()
+    if shutdown_event.is_set():
+        print("🛑 Stopped.")
+        exit_code = 130
+    sys.exit(exit_code)
+
+
+def _run(args):
+    from helpers.vaapi_utils import vaapi_available
+
     # Hardware encoder resolution (evaluated once at startup)
-    from datetime import datetime
     from helpers.vaapi_utils import vaapi_available
 
     # Step 1: Auto-detect VAAPI
@@ -372,313 +554,45 @@ Other useful options:
     # Handle special CLI commands
     if args.health_check:
         passed, results = run_health_check(vaapi_device if vaapi_supported else None)
-        sys.exit(0 if passed else 1)
+        return 0 if passed else 1
 
     if args.clear_error_tags:
         print("🏷️  Fetching scenes with error tags...")
         error_scenes = get_error_scenes()
         if not error_scenes:
             print("✅ No scenes with error tags found.")
-            sys.exit(0)
+            return 0
         scene_ids = [s['id'] for s in error_scenes]
         print(f"🏷️  Clearing error tags from {len(scene_ids)} scenes...")
         clear_error_tags(scene_ids)
         print(f"✅ Cleared error tags from {len(scene_ids)} scenes.")
-        sys.exit(0)
+        return 0
 
     if args.clear_hashing_tags:
         print("🏷️  Fetching scenes with stuck in-process tags...")
         hashing_scenes = get_hashing_scenes()
         if not hashing_scenes:
             print("✅ No scenes with stuck hashing tags found.")
-            sys.exit(0)
+            return 0
         scene_ids = [s['id'] for s in hashing_scenes]
         print(f"🏷️  Clearing hashing tag from {len(scene_ids)} scenes...")
         clear_hashing_tags(scene_ids)
         print(f"✅ Cleared hashing tag from {len(scene_ids)} scenes.")
-        sys.exit(0)
+        return 0
 
     # Run health checks before processing (unless disabled)
     if not config.dry_run:
         passed, results = run_health_check(vaapi_device if vaapi_supported else None)
         if not passed:
             print("❌ Health checks failed. Aborting. Use --health-check to diagnose.")
-            sys.exit(1)
+            return 1
 
-    # Standalone generation modes (process and exit, don't enter main loop)
-    standalone_mode = args.standalone_sprites or args.standalone_previews or args.standalone_markers
+    if args.standalone_sprites or args.standalone_previews or args.standalone_markers:
+        run_standalone(args, vaapi_supported, vaapi_device)
+    else:
+        run_scenes(args, vaapi_supported, vaapi_device)
+    return 0
 
-    if standalone_mode:
-        from tqdm import tqdm
-
-        while True:
-            if shutdown_requested:
-                print("🛑 Shutdown requested. Exiting...")
-                break
-
-            clean_temp_dirs()
-            work_found = False
-
-            # Standalone sprite generation
-            if args.standalone_sprites:
-                from helpers.sprite_discovery import discover_missing_sprites
-
-                print("🖼️ Discovering scenes missing sprites...")
-                missing_sprites = discover_missing_sprites(limit=args.sprite_batch_size or 25)
-
-                if missing_sprites:
-                    work_found = True
-                    print(f"📦 Found {len(missing_sprites)} scenes needing sprites")
-                    batch_stats.start_batch(len(missing_sprites))
-
-                    executor = ThreadPoolExecutor(max_workers=config.max_workers)
-                    try:
-                        futures = [executor.submit(process_sprite, scene_data, idx, len(missing_sprites),
-                                                  vaapi_supported, vaapi_device)
-                                  for idx, scene_data in enumerate(missing_sprites, 1)]
-
-                        if config.verbose:
-                            iterator = tqdm(futures, desc="🖼️ Generating Sprites", unit="sprite")
-                        else:
-                            iterator = futures
-
-                        for future in iterator:
-                            if shutdown_requested:
-                                break
-                            try:
-                                result = future.result(timeout=600)
-                                if result and result.get('success'):
-                                    batch_stats.record_success(result.get('elapsed_time'))
-                                else:
-                                    batch_stats.record_failure()
-                            except (TimeoutError, Exception) as e:
-                                print(f"⚠️ Sprite generation error: {e}")
-                                batch_stats.record_failure()
-
-                        print(batch_stats.get_summary())
-                    finally:
-                        executor.shutdown(wait=True)
-                else:
-                    print("✅ All scenes have sprites")
-
-            # Standalone preview generation
-            if args.standalone_previews and not shutdown_requested:
-                from helpers.preview_discovery import discover_missing_previews
-
-                print("🎞️ Discovering scenes missing previews...")
-                missing_previews = discover_missing_previews(limit=args.preview_batch_size or 25)
-
-                if missing_previews:
-                    work_found = True
-                    print(f"📦 Found {len(missing_previews)} scenes needing previews")
-                    batch_stats.start_batch(len(missing_previews))
-
-                    executor = ThreadPoolExecutor(max_workers=config.max_workers)
-                    try:
-                        futures = [executor.submit(process_preview, scene_data, idx, len(missing_previews),
-                                                  vaapi_supported, vaapi_device)
-                                  for idx, scene_data in enumerate(missing_previews, 1)]
-
-                        if config.verbose:
-                            iterator = tqdm(futures, desc="🎞️ Generating Previews", unit="preview")
-                        else:
-                            iterator = futures
-
-                        for future in iterator:
-                            if shutdown_requested:
-                                break
-                            try:
-                                result = future.result(timeout=600)
-                                if result and result.get('success'):
-                                    batch_stats.record_success(result.get('elapsed_time'))
-                                else:
-                                    batch_stats.record_failure()
-                            except (TimeoutError, Exception) as e:
-                                print(f"⚠️ Preview generation error: {e}")
-                                batch_stats.record_failure()
-
-                        print(batch_stats.get_summary())
-                    finally:
-                        executor.shutdown(wait=True)
-                else:
-                    print("✅ All scenes have previews")
-
-            # Standalone marker generation
-            if args.standalone_markers and not shutdown_requested:
-                from helpers.marker_discovery import discover_missing_markers
-
-                print("🎯 Discovering scenes with markers needing media generation...")
-                missing_markers = discover_missing_markers(limit=config.marker_batch_size)
-
-                if missing_markers:
-                    work_found = True
-                    scene_count = len({m['scene_id'] for m in missing_markers})
-                    print(f"📦 Found {len(missing_markers)} markers across {scene_count} scene(s) needing generation")
-                    batch_stats.start_batch(len(missing_markers))
-
-                    executor = None
-                    try:
-                        executor = ThreadPoolExecutor(max_workers=config.max_workers)
-                        futures = [executor.submit(process_marker, marker_data, idx, len(missing_markers),
-                                                  vaapi_supported, vaapi_device)
-                                  for idx, marker_data in enumerate(missing_markers, 1)]
-
-                        if config.verbose:
-                            print()
-                            iterator = tqdm(futures, desc="🎯 Processing Markers", unit="marker")
-                        else:
-                            iterator = futures
-
-                        for future in iterator:
-                            if shutdown_requested:
-                                print("\n🛑 Shutdown requested. Cancelling remaining markers...")
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                break
-
-                            try:
-                                result = future.result(timeout=300)  # 5 minute timeout
-                                if result and result.get('success'):
-                                    batch_stats.record_success(result.get('elapsed_time'))
-                                else:
-                                    batch_stats.record_failure()
-                            except TimeoutError:
-                                print(f"⚠️ Marker processing timed out after 5 minutes")
-                                batch_stats.record_failure()
-                            except Exception as e:
-                                print(f"⚠️ Worker thread error: {e}")
-                                batch_stats.record_failure()
-
-                        print(batch_stats.get_summary())
-
-                    except KeyboardInterrupt:
-                        print("\n🛑 Interrupted by user. Shutting down gracefully...")
-                        if executor:
-                            executor.shutdown(wait=False, cancel_futures=True)
-                    finally:
-                        if executor:
-                            executor.shutdown(wait=True)
-                else:
-                    print("✅ All markers have required media")
-
-            if not work_found:
-                print("✅ No remaining work found. Exiting.")
-                break
-
-            if config.once:
-                print("✅ Finished single batch. Exiting due to --once flag.")
-                break
-
-            if shutdown_requested:
-                break
-
-            if config.batch_sleep > 0:
-                print(f"⏳ Waiting {config.batch_sleep}s before next batch... Press Ctrl+C to cancel.")
-                if shutdown_event.wait(timeout=config.batch_sleep):
-                    break
-
-        clean_temp_dirs(recreate=False)
-        reset_terminal()
-        sys.exit(0)
-
-    while True:
-        if shutdown_requested:
-            print("🛑 Shutdown requested. Exiting...")
-            clean_temp_dirs(recreate=False)
-            reset_terminal()
-            break
-
-        clean_temp_dirs()
-
-        # Get scenes to process (retry errors or normal discovery)
-        if args.retry_errors:
-            print("🔄 Fetching scenes with error tags for retry...")
-            scenes = get_error_scenes()
-            if not scenes:
-                print("✅ No error scenes to retry. Exiting.")
-                clean_temp_dirs(recreate=False)
-                reset_terminal()
-                break
-            # Clear error tags so they can be reprocessed
-            scene_ids = [s['id'] for s in scenes]
-            clear_error_tags(scene_ids)
-        else:
-            scenes = discover_scenes()
-
-        if not scenes:
-            print("✅ No scenes to process. Exiting.")
-            print("🧹 Cleaning up temporary directories...")
-            clean_temp_dirs(recreate=False)
-            reset_terminal()
-            break
-
-        total_batch = len(scenes)
-        total_database = get_total_scene_count()
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🎯 Selected page with {total_batch} scenes (out of {total_database} total)")
-
-        # Initialize statistics tracking
-        batch_stats.start_batch(total_batch)
-
-        executor = None
-        try:
-            executor = ThreadPoolExecutor(max_workers=config.max_workers)
-            futures = []
-            for index, scene in enumerate(scenes, start=1):
-                futures.append(executor.submit(process_scene, scene, index, total_batch, vaapi_supported, vaapi_device))
-
-            # Progress bar for batch completion
-            if config.verbose:
-                from tqdm import tqdm
-                print()  # Blank line before progress bar
-                iterator = tqdm(futures, desc="📦 Processing Batch", unit="scene", total=len(futures),
-                               leave=True, dynamic_ncols=True, position=0)
-            else:
-                iterator = futures
-
-            for future in iterator:
-                if shutdown_requested:
-                    print("\n🛑 Shutdown requested. Cancelling remaining scenes...")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-
-                try:
-                    result = future.result(timeout=600)  # 10 minute timeout per scene
-                    if result and result.get('success'):
-                        batch_stats.record_success(result.get('elapsed_time'))
-                    else:
-                        batch_stats.record_failure()
-                except TimeoutError:
-                    print(f"⚠️ Scene processing timed out after 10 minutes")
-                    batch_stats.record_failure()
-                except Exception as e:
-                    print(f"⚠️ Worker thread error: {e}")
-                    batch_stats.record_failure()
-
-            # Print statistics summary
-            print(batch_stats.get_summary())
-
-        except KeyboardInterrupt:
-            print("\n🛑 Interrupted by user. Shutting down gracefully...")
-            if executor:
-                executor.shutdown(wait=False, cancel_futures=True)
-            print("🧹 Cleaning up temporary directories...")
-            clean_temp_dirs(recreate=False)
-            reset_terminal()
-            break
-        finally:
-            if executor:
-                executor.shutdown(wait=True)
-
-        if config.once:
-            print("✅ Finished single batch. Exiting due to --once flag.")
-            print("🧹 Cleaning up temporary directories...")
-            clean_temp_dirs(recreate=False)
-            reset_terminal()
-            break
-
-        if config.batch_sleep > 0:
-            print(f"⏳ Waiting {config.batch_sleep}s before next batch... Press Ctrl+C to cancel.")
-            if shutdown_event.wait(timeout=config.batch_sleep):
-                break
 
 if __name__ == '__main__':
     main()

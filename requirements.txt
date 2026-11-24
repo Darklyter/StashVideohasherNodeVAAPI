@@ -3,6 +3,9 @@
 # Stash API client
 stashapp-tools>=0.2.0
 
+# HTTP client (cover image check)
+requests>=2.25.0
+
 # Image processing
 Pillow>=9.0.0
 

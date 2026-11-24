@@ -4,6 +4,7 @@ import os
 import sys
 import subprocess
 from helpers.stash_utils import stash
+from helpers import ffmpeg_utils
 import config
 
 def check_stash_connection():
@@ -51,6 +52,9 @@ def check_output_paths():
     if config.generate_preview:
         paths_to_check.append(("Preview path", config.preview_path))
 
+    if config.generate_markers:
+        paths_to_check.append(("Marker path", config.marker_path))
+
     for name, path in paths_to_check:
         if not os.path.exists(path):
             return False, f"{name} does not exist: {path}"
@@ -73,7 +77,7 @@ def check_vaapi_encoding(vaapi_device):
     """Test a real VAAPI encode using a synthetic source — verifies ffmpeg can use the GPU"""
     if config.windows:
         return True, "VAAPI encoding check skipped (Windows)"
-    test_output = os.path.join(os.getcwd(), ".tmp", "vaapi_encode_test.mp4")
+    test_output = ffmpeg_utils.tmp_path("vaapi_encode_test.mp4")
     try:
         os.makedirs(os.path.dirname(test_output), exist_ok=True)
         result = subprocess.run([
@@ -102,7 +106,7 @@ def check_vaapi_encoding(vaapi_device):
 
 def check_nvenc_encoding():
     """Test a real NVENC encode using a synthetic source — verifies ffmpeg can use the NVIDIA GPU"""
-    test_output = os.path.join(os.getcwd(), ".tmp", "nvenc_encode_test.mp4")
+    test_output = ffmpeg_utils.tmp_path("nvenc_encode_test.mp4")
     try:
         os.makedirs(os.path.dirname(test_output), exist_ok=True)
         result = subprocess.run([
@@ -131,10 +135,8 @@ def check_nvenc_encoding():
 def check_temp_directory():
     """Verify temp directory can be created"""
     try:
-        temp_dir = os.path.join(os.getcwd(), ".tmp")
-        os.makedirs(temp_dir, exist_ok=True)
         # Try to write a test file
-        test_file = os.path.join(temp_dir, "health_check_test")
+        test_file = ffmpeg_utils.tmp_path("health_check_test")
         with open(test_file, 'w') as f:
             f.write("test")
         os.remove(test_file)
