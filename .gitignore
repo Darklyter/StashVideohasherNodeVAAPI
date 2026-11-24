@@ -72,9 +72,9 @@ desktop.ini
 .settings/
 .vs/
 
-# Test files
-test_*.py
-*_test.py
+# Scratch test files outside the test suite
+/test_*.py
+/*_test.py
 
 # Benchmark data files
 benchmarking/*.json
