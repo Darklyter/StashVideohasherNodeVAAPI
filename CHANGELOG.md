@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-24
+
+### Fixed
+- **`--dry-run` wrote to Stash** - `dry_run` (and `verbose`, `nvenc`, `max_workers`) were copied at import time, before CLI flags were applied. All modules now read `config.<name>` live, so `--dry-run` no longer claims, tags or clears anything, and `--nvenc` / `--verbose` / `--max-workers` reach the generators
+- **`config.py` values overwritten by CLI defaults** - `dry_run`, `verbose`, `once`, `debug` and `generate_markers` are now only overridden when the flag is actually passed. **Note:** `generate_markers = True` in `config.py` now takes effect
+- **Ctrl+C** - One Ctrl+C now stops within about a second. ffmpeg children run in their own process group and are terminated deliberately; interrupted scenes are released, not tagged as errors; a second Ctrl+C forces an exit
+- **Partial output files** - Previews, sprites, VTTs and marker media are written to a temp name and renamed on success, so an interrupted or failed job never leaves a truncated file that later looks finished
+- **`--filemask` / `excluded_paths` ended runs early** - Both are now applied in the Stash query, so the random page always contains eligible scenes and the totals are accurate
+- **Standalone modes could loop forever** - The library is scanned once per run; failed sprites/previews are tagged with the hashing error tag and skipped by later runs; generators now raise on failure instead of reporting success
+- **`--retry-errors` looped forever** - Takes one snapshot of the error scenes, works through it in batches, and exits
+- **Path translation** - Only prefixes are translated (a folder named like a mount point mid-path is left alone); several entries with the same `orig` are tried in order until the file exists
+- **Missing timeouts** - Every external process now has a timeout
+- **Short videos** - Videos too short for the configured preview sampling get a single-clip preview instead of failing
+- **Cover check with authentication** - The API key is now sent when checking for the placeholder cover
+- **VAAPI detection** - All `/dev/dri/renderD*` nodes are tried, not just `renderD128`
+- **Standalone modes ignored `--dry-run`**
+- Stash is contacted on first use instead of at import, so `--help` and `--version` work when Stash is unreachable
+- Relative paths in `config.py` resolve against the project directory regardless of where the script is started
+
+### Changed
+- **Aspect ratio preserved** - Sprite tiles are 160px wide with height following the video (as Stash's own generator does); previews are 640px wide with proportional height. Existing files are not regenerated
+- **Preview clips joined with a stream copy** instead of a second encode
+- Sprites fall back to software decoding when VAAPI decoding fails for a file
+- Internal phash backend extracts frames with `scale=160:-2`, matching the `videohashes` binary
+- Marker generation only creates the files that are missing
+- A scene already claimed by another node is skipped instead of processed twice
+- Temp files live in `.tmp/<hostname>-<pid>/`, so several instances can share one checkout
+- `--windows` is deprecated and ignored (the platform is auto-detected)
+- New optional `max_ffmpeg_procs` setting caps concurrent ffmpeg processes (default: no cap)
+- `config.py` is no longer tracked; the test suite now is
+
 ## [1.3.0] - 2026-04-03
 
 ### Added

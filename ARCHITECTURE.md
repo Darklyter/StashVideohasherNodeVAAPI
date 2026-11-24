@@ -615,7 +615,7 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi \
 ```bash
 ffmpeg -vaapi_device /dev/dri/renderD128 \
   -ss 30 -i input.mp4 -t 1 \
-  -vf 'format=nv12,hwupload,scale_vaapi=640:360' \
+  -vf 'format=nv12,hwupload,scale_vaapi=w=640:h=-2' \
   -c:v h264_vaapi -global_quality 18 \
   -an clip.mp4
 ```
@@ -623,7 +623,7 @@ ffmpeg -vaapi_device /dev/dri/renderD128 \
 **Preview Clip Extraction (NVENC):**
 ```bash
 ffmpeg -ss 30 -i input.mp4 -t 1 \
-  -s 640x360 \
+  -vf scale=640:-2 \
   -c:v h264_nvenc -cq:v 18 -preset p4 \
   -an clip.mp4
 ```
@@ -631,7 +631,7 @@ ffmpeg -ss 30 -i input.mp4 -t 1 \
 **Preview Clip Extraction (Software):**
 ```bash
 ffmpeg -ss 30 -i input.mp4 -t 1 \
-  -s 640x360 \
+  -vf scale=640:-2 \
   -c:v libx264 -crf 18 -preset slow \
   -an clip.mp4
 ```
@@ -640,7 +640,7 @@ ffmpeg -ss 30 -i input.mp4 -t 1 \
 ```bash
 ffmpeg -f concat -i clips.txt \
   -vaapi_device /dev/dri/renderD128 \
-  -vf 'format=nv12,hwupload,scale_vaapi=640:360' \
+  -vf 'format=nv12,hwupload,scale_vaapi=w=640:h=-2' \
   -c:v h264_vaapi -global_quality 18 \
   -an preview.mp4
 ```

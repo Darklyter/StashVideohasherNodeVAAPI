@@ -269,7 +269,6 @@ Core options:
   --debug               FFmpeg commands and timing breakdowns
   --dry-run             Simulate without making changes
   --filemask PATTERN    Filter scenes by filename (e.g. 'JoonMali*')
-  --windows             Use Windows paths and binaries
 
 Integrated scene processing (only runs on scenes missing a phash):
   --generate-sprite     Force sprite generation on during scene processing
@@ -348,7 +347,9 @@ Setting up VAAPI on Ubuntu:
 - **FFmpeg VAAPI guide:** [trac.ffmpeg.org/wiki/Hardware/VAAPI](https://trac.ffmpeg.org/wiki/Hardware/VAAPI) — covers filter graphs, encode/decode support, and troubleshooting FFmpeg-specific issues.
 - **Ubuntu community wiki:** [help.ubuntu.com/community/HardwareVideoAcceleration](https://help.ubuntu.com/community/HardwareVideoAcceleration) — broader overview of VA-API, VDPAU, and NVENC setup on Ubuntu.
 
-**Leftover temp directories** — All temp files go in `.tmp/` and are cleaned automatically at the start and end of each run. If something was interrupted, just run the script again and it'll clean up.
+**Leftover temp directories** — Temp files go in `.tmp/<hostname>-<pid>/` and are removed when the run ends, including after Ctrl+C. Directories left by a hard kill are cleaned up by the next run on the same machine.
+
+**Stopping a run** — Press Ctrl+C once: running ffmpeg jobs are stopped, claimed scenes are released, nothing is tagged as an error, and partial output files are discarded. Press Ctrl+C a second time to force quit immediately (then use `--clear-hashing-tags` to release any scenes left tagged as in-process).
 
 **Error tags piling up** — Check `error_log.txt` to see what failed, fix any config issues, then:
 ```bash
