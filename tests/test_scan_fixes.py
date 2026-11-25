@@ -216,3 +216,13 @@ class TestShortVideoPlan(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_preview_clip_limits_input_duration():
+    """-t must precede -i (input option) or VAAPI clips die with ENOMEM / exit 244."""
+    from helpers.preview_video_generator import PreviewVideoGenerator
+    for vaapi in (True, False):
+        gen = PreviewVideoGenerator('/v/a.mp4', '/o/a.mp4', 'abc',
+                                    use_vaapi=vaapi, vaapi_device='/dev/dri/renderD128')
+        cmd = gen._clip_command(12.5, 1, '/tmp/clip.mp4')
+        assert cmd.index('-ss') < cmd.index('-t') < cmd.index('-i')

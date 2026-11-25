@@ -61,8 +61,11 @@ class PreviewVideoGenerator:
         use_vaapi = bool(self.use_vaapi) and bool(self.vaapi_device)
         input_opts, output_opts = ffmpeg_utils.h264_encode_args(use_vaapi, self.vaapi_device, width=640)
         audio_args = ['-c:a', 'aac', '-b:a', '192k'] if self.include_audio else ['-an']
+        # -t goes BEFORE -i so it limits the input: as an output option the decoder
+        # keeps running past the clip, hwupload's surface pool overflows and
+        # ffmpeg dies with ENOMEM (exit 244) on VAAPI.
         return ([self.ffmpeg] + input_opts +
-                ['-ss', str(start_time), '-i', self.filename, '-t', str(length)] +
+                ['-ss', str(start_time), '-t', str(length), '-i', self.filename] +
                 output_opts + audio_args +
                 ['-y', '-loglevel', 'error', clip_file])
 
